@@ -78,86 +78,67 @@ const musicApiPlugin = () => ({
       }
     });
 
-    // 2. Full song audio resolver (no 30s limit!)
+    // 2. Local equivalent of the Cloudflare full-audio resolver.
+    // It searches the supported Audius catalog; it does not scrape protected platforms.
     server.middlewares.use('/api/full-audio', async (req, res) => {
       try {
         const url = new URL(req.url, 'http://localhost');
         const artist = url.searchParams.get('artist') || '';
         const title = url.searchParams.get('title') || '';
-        const q = url.searchParams.get('q') || `${artist} ${title}`;
+        const q = url.searchParams.get('q') || [artist, title].filter(Boolean).join(' ');
 
         if (!q.trim()) {
           res.statusCode = 400;
           res.setHeader('Content-Type', 'application/json');
-          res.setHeader('Access-Control-Allow-Origin', '*');
           return res.end(JSON.stringify({ error: 'Nenhum termo de busca fornecido' }));
         }
 
-        const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(q.trim() + ' audio')}`;
-        const ytRes = await fetch(searchUrl, {
-          headers: {
-            'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
-          }
-        });
+        const norm = value =>
+          (value || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+        const bad = value =>
+          /\\b(cover|karaoke|acapella|a cappella|instrumental|remix|rework|bootleg|edit|sped up|slowed|nightcore|version|tribute|dublagem|parodia|parody|live|ao vivo)\\b/i.test(value || '');
+        const wantedTitle = norm(title);
+        const wantedArtist = norm(artist);
+        const queries = [q, title, [title, artist].filter(Boolean).join(' ')].filter(Boolean);
 
-        if (!ytRes.ok) {
-          res.statusCode = ytRes.status;
-          res.setHeader('Content-Type', 'application/json');
-          res.setHeader('Access-Control-Allow-Origin', '*');
-          return res.end(JSON.stringify({ error: 'Erro ao buscar áudio' }));
-        }
-
-        const html = await ytRes.text();
-        let videoId = null;
-        let duration = 0;
-        let trackTitle = title || q;
-
-        const jsonMatch = html.match(/var ytInitialData = ({[\s\S]*?});<\/script>/);
-        if (jsonMatch) {
-          try {
-            const data = JSON.parse(jsonMatch[1]);
-            const contents =
-              data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents?.[0]
-                ?.itemSectionRenderer?.contents;
-            const video = contents?.find(c => c.videoRenderer)?.videoRenderer;
-            if (video) {
-              videoId = video.videoId;
-              trackTitle = video.title?.runs?.[0]?.text || trackTitle;
-              const durStr = video.lengthText?.simpleText;
-              if (durStr) {
-                const parts = durStr.split(':').map(Number);
-                if (parts.length === 2) duration = parts[0] * 60 + parts[1];
-                else if (parts.length === 3) duration = parts[0] * 3600 + parts[1] * 60 + parts[2];
-              }
-            }
-          } catch (e) {}
-        }
-
-        if (!videoId) {
-          const match = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
-          if (match) videoId = match[1];
+        let match = null;
+        for (const query of queries) {
+          const r = await fetch(
+            'https://api.audius.co/v1/tracks/search?query=' +
+              encodeURIComponent(query) +
+              '&limit=15&sort_method=relevant&app_name=PobreMusic'
+          );
+          if (!r.ok) continue;
+          const data = await r.json();
+          const tracks = (data.data || []).filter(t => (t.duration || 0) > 40 && !bad(t.title) && !bad(t.user?.name));
+          match = tracks.find(t => {
+            const tt = norm(t.title);
+            const names = [t.user?.name, t.artist, t.artist_name].filter(Boolean).map(norm);
+            const titleOk = wantedTitle && wantedTitle.split(' ').every(word => tt.includes(word));
+            const artistOk = !wantedArtist || names.some(name => name === wantedArtist || name.includes(wantedArtist) || wantedArtist.includes(name));
+            return titleOk && artistOk;
+          });
+          if (match) break;
         }
 
         res.statusCode = 200;
         res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.end(
-          JSON.stringify({
-            success: !!videoId,
-            videoId,
-            duration,
-            title: trackTitle
-          })
-        );
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        return res.end(JSON.stringify(match ? {
+          success: true,
+          id: match.id,
+          title: match.title,
+          duration: match.duration || 0,
+          artwork: match.artwork || null,
+          sourceUrl: 'https://api.audius.co/v1/tracks/' + match.id + '/stream?app_name=PobreMusic'
+        } : { success: false, sourceUrl: null }));
       } catch (err) {
         res.statusCode = 500;
         res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Access-Control-Allow-Origin', '*');
         res.end(JSON.stringify({ error: err.message || 'Erro interno' }));
       }
     });
+
   }
 });
 
