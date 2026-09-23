@@ -353,6 +353,16 @@ function Player({ queue, setQueue }) {
 
   const userWantsPlayRef = useRef(false);
   const audioContextRef = useRef(null);
+  const queueRef = useRef(queue);
+  const trackRef = useRef(null);
+
+  useEffect(() => {
+    queueRef.current = queue;
+  }, [queue]);
+
+  useEffect(() => {
+    trackRef.current = track;
+  }, [track]);
 
   // Initialize Web Audio continuous keep-alive on user interaction
   const initWebAudioKeepAlive = () => {
@@ -582,10 +592,15 @@ function Player({ queue, setQueue }) {
           setTime((state.position || 0) / 1000);
           setDur((state.duration || 0) / 1000);
           setPlaying(!state.paused);
+          userWantsPlayRef.current = !state.paused;
           const current = state.track_window?.current_track;
-          if (current?.uri && track?.spotifyUri && current.uri !== track.spotifyUri) {
-            const nextTrack = queue.find(q => q.spotifyUri === current.uri);
-            if (nextTrack) setTrack(nextTrack);
+          if (current?.uri && current.uri !== trackRef.current?.spotifyUri) {
+            const currentIndex = queueRef.current.findIndex(q => q.spotifyUri === current.uri);
+            const nextTrack = currentIndex >= 0 ? queueRef.current[currentIndex] : null;
+            if (nextTrack) {
+              setIdx(currentIndex);
+              setTrack(nextTrack);
+            }
           }
         });
 
