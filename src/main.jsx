@@ -245,7 +245,9 @@ const getSpotifyAccessToken = async () => {
 
   const refresh = localStorage.getItem('pm-spotify-refresh-token');
   const clientId = localStorage.getItem('pm-spotify-client-id');
-  if (!refresh || !clientId) return access || null;
+  if (!refresh || !clientId) {
+    return access && (!expiresAt || expiresAt > Date.now()) ? access : null;
+  }
 
   if (!spotifyRefreshPromise) {
     spotifyRefreshPromise = (async () => {
@@ -1417,7 +1419,7 @@ function App() {
           const j = await r.json();
           const raw = j.data || [];
           const filtered = raw.filter(t => !bad(t.title) && !bad(t.user?.name));
-          c = filtered.length > 0 ? filtered : raw;
+          c = filtered;
         }
       } catch {}
 
