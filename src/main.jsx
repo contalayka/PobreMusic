@@ -234,6 +234,54 @@ const pkce = async () => {
   };
 };
 
+let spotifyRefreshPromise = null;
+
+const getSpotifyAccessToken = async () => {
+  const access = localStorage.getItem('pm-spotify-access-token');
+  const expiresAt = Number(localStorage.getItem('pm-spotify-expires-at') || 0);
+  if (access && (!expiresAt || expiresAt > Date.now() + 60_000)) return access;
+
+  const refresh = localStorage.getItem('pm-spotify-refresh-token');
+  const clientId = localStorage.getItem('pm-spotify-client-id');
+  if (!refresh || !clientId) return access || null;
+
+  if (!spotifyRefreshPromise) {
+    spotifyRefreshPromise = (async () => {
+      try {
+        const body = new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: refresh,
+          client_id: clientId
+        });
+        const res = await fetch(SA + '/api/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body
+        });
+        const data = await res.json();
+        if (!res.ok || !data.access_token) {
+          if (data.error === 'invalid_grant') {
+            localStorage.removeItem('pm-spotify-access-token');
+            localStorage.removeItem('pm-spotify-refresh-token');
+            localStorage.removeItem('pm-spotify-expires-at');
+          }
+          throw new Error(data.error_description || data.error || 'Falha ao renovar token');
+        }
+        localStorage.setItem('pm-spotify-access-token', data.access_token);
+        localStorage.setItem('pm-spotify-expires-at', String(Date.now() + (data.expires_in || 3600) * 1000));
+        if (data.refresh_token) localStorage.setItem('pm-spotify-refresh-token', data.refresh_token);
+        return data.access_token;
+      } catch (err) {
+        console.warn('Spotify token refresh failed:', err);
+        return null;
+      } finally {
+        spotifyRefreshPromise = null;
+      }
+    })();
+  }
+  return spotifyRefreshPromise;
+};
+
 // Error Boundary to prevent any blank white screen
 class ErrorBoundary extends Component {
   constructor(props) {
@@ -476,22 +524,19 @@ function Player({ queue, setQueue }) {
     };
   }, [src]);
 
-  // Safe Spotify Web Playback SDK integration
+  // Spotify Web Playback SDK
   useEffect(() => {
-    const token = localStorage.getItem('pm-spotify-access-token');
-    if (!token) return;
-
     let isMounted = true;
+    let player = null;
 
-    const initSpotifyPlayer = () => {
+    const initSpotifyPlayer = async () => {
       try {
-        if (!window.Spotify || !window.Spotify.Player) return;
-        const player = new window.Spotify.Player({
+        const token = await getSpotifyAccessToken();
+        if (!token || !window.Spotify?.Player) return;
+
+        player = new window.Spotify.Player({
           name: 'PobreMusic Player',
-          getOAuthToken: cb => {
-            const currentToken = localStorage.getItem('pm-spotify-access-token') || token;
-            cb(currentToken);
-          },
+          getOAuthToken: async cb => cb((await getSpotifyAccessToken()) || token),
           volume: vol
         });
 
@@ -499,33 +544,51 @@ function Player({ queue, setQueue }) {
           deviceRef.current = device_id;
           if (isMounted) setSpotifyReady(true);
         });
-
         player.addListener('not_ready', () => {
+          deviceRef.current = '';
           if (isMounted) setSpotifyReady(false);
         });
-
-        player.addListener('authentication_error', () => {
+        player.addListener('authentication_error', ({ message }) => {
+          console.warn('Spotify authentication error:', message);
           if (isMounted) setSpotifyReady(false);
         });
-
-        player.addListener('account_error', () => {
+        player.addListener('account_error', ({ message }) => {
+          console.warn('Spotify account error:', message);
           if (isMounted) setSpotifyReady(false);
         });
+        player.addListener('initialization_error', ({ message }) => console.warn('Spotify initialization error:', message));
+        player.addListener('playback_error', ({ message }) => console.warn('Spotify playback error:', message));
+        player.addListener('autoplay_failed', () => console.warn('Spotify autoplay was blocked by the browser.'));
+        player.addListener('player_state_changed', state => {
+          if (!state || !isMounted) return;
+          setTime((state.position || 0) / 1000);
+          setDur((state.duration || 0) / 1000);
+          setPlaying(!state.paused);
+          const current = state.track_window?.current_track;
+          if (current?.uri && track?.spotifyUri && current.uri !== track.spotifyUri) {
+            const nextTrack = queue.find(q => q.spotifyUri === current.uri);
+            if (nextTrack) setTrack(nextTrack);
+          }
+          if (state.paused && state.duration > 0 && state.position >= state.duration - 500 && !repeatRef.current) {
+            setTimeout(() => next(), 0);
+          }
+        });
 
-        player.connect().catch(() => {});
         spotifyRef.current = player;
+        const connected = await player.connect();
+        if (!connected && isMounted) setSpotifyReady(false);
       } catch (err) {
         console.warn('Spotify SDK init error:', err);
       }
     };
 
-    if (window.Spotify && window.Spotify.Player) {
-      initSpotifyPlayer();
-    } else {
-      window.onSpotifyWebPlaybackSDKReady = () => {
-        if (isMounted) initSpotifyPlayer();
-      };
+    const boot = () => {
+      if (window.Spotify?.Player) initSpotifyPlayer();
+      else window.onSpotifyWebPlaybackSDKReady = initSpotifyPlayer;
+    };
 
+    if (localStorage.getItem('pm-spotify-access-token')) {
+      boot();
       if (!document.getElementById('spotify-player-script')) {
         const s = document.createElement('script');
         s.id = 'spotify-player-script';
@@ -537,11 +600,20 @@ function Player({ queue, setQueue }) {
 
     return () => {
       isMounted = false;
-      try {
-        spotifyRef.current?.disconnect();
-      } catch {}
+      try { player?.disconnect(); } catch {}
+      if (window.onSpotifyWebPlaybackSDKReady === initSpotifyPlayer) {
+        window.onSpotifyWebPlaybackSDKReady = null;
+      }
+      spotifyRef.current = null;
+      deviceRef.current = '';
     };
   }, []);
+
+  useEffect(() => {
+    if (mode === 'spotify' && spotifyRef.current) {
+      spotifyRef.current.setVolume(vol).catch(() => {});
+    }
+  }, [vol, mode]);
 
   // Background audio & Lock-screen controls (MediaSession API)
   useEffect(() => {
@@ -654,28 +726,29 @@ function Player({ queue, setQueue }) {
     };
   }, [playing, mode]);
 
-  const fallbackToYouTube = async t => {
-    let resolved = t;
-    if (!t.youtubeId) {
-      setLoadingTrack(true);
-      resolved = await resolveFullAudio(t);
-      setLoadingTrack(false);
-      setTrack(resolved);
-      if (resolved.duration) setDur(resolved.duration);
-    }
-    if (resolved.youtubeId) {
-      initWebAudioKeepAlive();
-      userWantsPlayRef.current = true;
-      window.__keepBackgroundAudioPlaying = true;
-      setMode('yt');
+  const fallbackToSource = async t => {
+    setLoadingTrack(true);
+    const artist = t.user?.name || t.artist || t.artists?.[0]?.name || '';
+    const title = t.name || t.title || '';
+    const resolved = await resolveFullAudio(t);
+    if (resolved?.sourceUrl) {
+      const updated = { ...t, sourceUrl: resolved.sourceUrl, duration: resolved.duration || t.duration || 180, artwork: t.artwork || resolved.artwork };
+      setTrack(updated);
+      setDur(updated.duration);
+      setMode('audio');
+      setSrc(updated.sourceUrl);
       setPlaying(true);
       if (ref.current) {
-        ref.current.src = SILENT_AUDIO_URI;
-        ref.current.loop = true;
-        ref.current.volume = 0.001;
-        ref.current.play().catch(() => {});
+        ref.current.src = updated.sourceUrl;
+        ref.current.loop = false;
+        ref.current.volume = vol;
+        ref.current.play().catch(() => setPlaying(false));
       }
+    } else {
+      setPlaying(false);
+      console.warn('No playable source found for:', artist, title);
     }
+    setLoadingTrack(false);
   };
 
   const startPlayback = async (t, i) => {
@@ -688,20 +761,31 @@ function Player({ queue, setQueue }) {
     setTime(0);
     setDur(t.duration || 180);
 
-    const tk = localStorage.getItem('pm-spotify-access-token');
+    const tk = t.spotifyUri ? await getSpotifyAccessToken() : null;
     if (t.spotifyUri && tk && deviceRef.current && spotifyReady) {
       setMode('spotify');
       setPlaying(true);
       try {
-        await fetch(SP + '/me/player/play?device_id=' + encodeURIComponent(deviceRef.current), {
+        spotifyRef.current?.activateElement?.();
+        const res = await fetch(SP + '/me/player/play?device_id=' + encodeURIComponent(deviceRef.current), {
           method: 'PUT',
-          headers: {
-            Authorization: 'Bearer ' + tk,
-            'Content-Type': 'application/json'
-          },
+          headers: { Authorization: 'Bearer ' + tk, 'Content-Type': 'application/json' },
           body: JSON.stringify({ uris: [t.spotifyUri] })
         });
-      } catch {}
+        if (res.status === 401) {
+          const fresh = await getSpotifyAccessToken();
+          if (fresh) {
+            await fetch(SP + '/me/player/play?device_id=' + encodeURIComponent(deviceRef.current), {
+              method: 'PUT',
+              headers: { Authorization: 'Bearer ' + fresh, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ uris: [t.spotifyUri] })
+            });
+          }
+        }
+      } catch (err) {
+        console.warn('Spotify playback start failed:', err);
+        setPlaying(false);
+      }
       return;
     }
 
@@ -727,7 +811,7 @@ function Player({ queue, setQueue }) {
         ref.current.volume = vol;
         ref.current.play().catch(err => {
           console.warn('Audio play failed, falling back to YouTube:', err);
-          fallbackToYouTube(t);
+          fallbackToSource(t);
         });
       }
       return;
@@ -849,6 +933,9 @@ function Player({ queue, setQueue }) {
           ref.current.pause();
         }
       }
+    } else if (mode === 'spotify' && spotifyRef.current) {
+      spotifyRef.current.activateElement?.();
+      spotifyRef.current.togglePlay().catch(() => setPlaying(false));
     } else if (mode === 'audio' && ref.current) {
       if (nextPlaying) {
         ref.current.play().catch(() => setPlaying(false));
@@ -872,6 +959,8 @@ function Player({ queue, setQueue }) {
           '*'
         );
       }
+    } else if (mode === 'spotify' && spotifyRef.current) {
+      spotifyRef.current.seek(Math.max(0, Math.floor(newVal * 1000))).catch(() => {});
     } else if (ref.current) {
       ref.current.currentTime = newVal;
     }
@@ -891,6 +980,9 @@ function Player({ queue, setQueue }) {
           '*'
         );
       }
+    }
+    if (mode === 'spotify' && spotifyRef.current) {
+      spotifyRef.current.setVolume(newVol).catch(() => {});
     }
     if (ref.current) {
       ref.current.volume = newVol;
@@ -918,7 +1010,7 @@ function Player({ queue, setQueue }) {
     ref,
     src,
     spotifyReady,
-    fallbackToYouTube
+    fallbackToSource
   };
 }
 
@@ -3479,7 +3571,11 @@ function ImportPanel({ onImport, onPlay, authUser, onGoogleLogin }) {
       const u = new URLSearchParams(window.location.search);
       const code = u.get('code');
       const state = u.get('state');
-      const saved = getStoredJSON('pm-spotify-pkce', null);
+      let saved = null;
+      try {
+        const raw = sessionStorage.getItem('pm-spotify-pkce');
+        saved = raw ? JSON.parse(raw) : null;
+      } catch {}
 
       if (!code || !saved || state !== saved.state) return;
 
@@ -3514,6 +3610,7 @@ function ImportPanel({ onImport, onPlay, authUser, onGoogleLogin }) {
           }).then(res => res.json());
           localStorage.setItem('pm-spotify-user', JSON.stringify(me));
           setUser(me);
+          sessionStorage.removeItem('pm-spotify-pkce');
           setStatus('Spotify conectado com sucesso!');
           window.history.replaceState({}, '', window.location.pathname);
         } catch (e) {
