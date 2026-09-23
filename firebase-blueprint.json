@@ -1,0 +1,66 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile document",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 256 },
+        "displayName": { "type": "string", "maxLength": 128 },
+        "photoURL": { "type": "string", "maxLength": 512 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Playlist": {
+      "title": "Playlist",
+      "description": "A user-owned music playlist",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 100 },
+        "image": { "type": "string", "maxLength": 1024 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "tracks": { "type": "array" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "name", "userId", "tracks"]
+    },
+    "SavedTrack": {
+      "title": "SavedTrack",
+      "description": "A saved track in library or liked songs",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 200 },
+        "artist": { "type": "string", "maxLength": 200 },
+        "duration": { "type": "number" },
+        "artworkUrl": { "type": "string", "maxLength": 1024 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "savedAt": { "type": "string" }
+      },
+      "required": ["id", "title", "userId"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User root document"
+    },
+    "/users/{userId}/playlists/{playlistId}": {
+      "schema": { "$ref": "#/entities/Playlist" },
+      "description": "Playlists belonging to a user"
+    },
+    "/users/{userId}/library/{trackId}": {
+      "schema": { "$ref": "#/entities/SavedTrack" },
+      "description": "Tracks saved in user library"
+    },
+    "/users/{userId}/liked/{trackId}": {
+      "schema": { "$ref": "#/entities/SavedTrack" },
+      "description": "Tracks liked by the user"
+    }
+  }
+}

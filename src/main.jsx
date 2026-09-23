@@ -26,9 +26,25 @@ import {
   Sparkles,
   Trash2,
   FolderPlus,
-  X
+  X,
+  Cloud,
+  UserCheck
 } from 'lucide-react';
 import './styles.css';
+import {
+  auth,
+  db,
+  googleProvider,
+  signInWithPopup,
+  signOut,
+  onAuthStateChanged,
+  doc,
+  setDoc,
+  deleteDoc,
+  collection,
+  onSnapshot,
+  handleFirestoreError
+} from './firebase';
 
 const API = 'https://api.audius.co/v1';
 const APP = 'PobreMusic';
@@ -767,6 +783,247 @@ function App() {
   const [newPlaylistModal, setNewPlaylistModal] = useState(false);
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [trending, setTrending] = useState([]);
+  const [authUser, setAuthUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [cloudSynced, setCloudSynced] = useState(false);
+
+  // Clean data helpers to prevent Firestore undefined errors
+  const cleanTrackForFirestore = t => ({
+    id: String(t.id || 'tr_' + Math.random().toString(36).slice(2)),
+    title: String(t.name || t.title || 'Sem título'),
+    artist: String(t.user?.name || t.artist || t.artists?.[0]?.name || 'Artista'),
+    duration: Number(t.duration || 190),
+    artworkUrl: String(t.artwork?.['_480x480'] || t.image || ''),
+    sourceUrl: t.sourceUrl || null,
+    youtubeId: t.youtubeId || null,
+    spotifyUri: t.spotifyUri || null
+  });
+
+  const cleanPlaylistForFirestore = pl => ({
+    id: String(pl.id),
+    name: String(pl.name || 'Minha Playlist'),
+    image: String(pl.image || ''),
+    tracks: (pl.tracks || []).map(cleanTrackForFirestore),
+    userId: authUser?.uid || '',
+    createdAt: pl.createdAt ? String(pl.createdAt) : new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+
+  // 1. Listen for Google Authentication
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async user => {
+      setAuthUser(user);
+      setAuthLoading(false);
+
+      if (user) {
+        try {
+          await setDoc(
+            doc(db, 'users', user.uid),
+            {
+              uid: user.uid,
+              email: user.email || '',
+              displayName: user.displayName || '',
+              photoURL: user.photoURL || '',
+              updatedAt: new Date().toISOString()
+            },
+            { merge: true }
+          );
+        } catch (e) {
+          handleFirestoreError(e, 'write', `users/${user.uid}`);
+        }
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  // 2. Real-time sync of Playlists from Firestore
+  useEffect(() => {
+    if (!authUser) {
+      setCloudSynced(false);
+      return;
+    }
+
+    const playlistsCol = collection(db, 'users', authUser.uid, 'playlists');
+    const unsub = onSnapshot(
+      playlistsCol,
+      async snapshot => {
+        const serverPlaylists = [];
+        snapshot.forEach(docSnap => {
+          const d = docSnap.data();
+          serverPlaylists.push({
+            id: d.id || docSnap.id,
+            name: d.name || 'Playlist',
+            image: d.image || '',
+            tracks: sanitizeList(
+              (d.tracks || []).map(t => ({
+                id: t.id,
+                title: t.title,
+                name: t.title,
+                user: { name: t.artist || 'Artista' },
+                artist: t.artist,
+                duration: t.duration || 190,
+                artwork: { '_480x480': t.artworkUrl || t.image || art({}) },
+                image: t.artworkUrl,
+                sourceUrl: t.sourceUrl || null,
+                youtubeId: t.youtubeId || null,
+                spotifyUri: t.spotifyUri || null
+              }))
+            ),
+            createdAt: d.createdAt || Date.now()
+          });
+        });
+
+        if (serverPlaylists.length > 0) {
+          setPlaylists(serverPlaylists);
+          setCloudSynced(true);
+        } else {
+          // Initial migration: upload existing local playlists to Firestore
+          const local = getStoredJSON('pm-playlists', []);
+          if (Array.isArray(local) && local.length > 0) {
+            for (const pl of local) {
+              try {
+                await setDoc(doc(db, 'users', authUser.uid, 'playlists', pl.id), {
+                  id: String(pl.id),
+                  name: String(pl.name || 'Minha Playlist'),
+                  image: String(pl.image || ''),
+                  tracks: (pl.tracks || []).map(cleanTrackForFirestore),
+                  userId: authUser.uid,
+                  createdAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString()
+                });
+              } catch (err) {
+                handleFirestoreError(err, 'write', `users/${authUser.uid}/playlists/${pl.id}`);
+              }
+            }
+            setCloudSynced(true);
+          }
+        }
+      },
+      error => {
+        handleFirestoreError(error, 'get', `users/${authUser.uid}/playlists`);
+      }
+    );
+
+    return () => unsub();
+  }, [authUser]);
+
+  // 3. Real-time sync of Library & Liked songs from Firestore
+  useEffect(() => {
+    if (!authUser) return;
+
+    const libCol = collection(db, 'users', authUser.uid, 'library');
+    const unsubLib = onSnapshot(
+      libCol,
+      async snapshot => {
+        const serverLib = [];
+        snapshot.forEach(docSnap => {
+          const d = docSnap.data();
+          serverLib.push({
+            id: d.id || docSnap.id,
+            title: d.title,
+            name: d.title,
+            user: { name: d.artist || 'Artista' },
+            artist: d.artist,
+            duration: d.duration || 190,
+            artwork: { '_480x480': d.artworkUrl || d.image || art({}) },
+            sourceUrl: d.sourceUrl || null,
+            youtubeId: d.youtubeId || null
+          });
+        });
+
+        if (serverLib.length > 0) {
+          setLibrary(sanitizeList(serverLib));
+        } else {
+          const localLib = getStoredJSON('pm-library', []);
+          if (Array.isArray(localLib) && localLib.length > 0) {
+            for (const t of localLib.slice(0, 50)) {
+              try {
+                await setDoc(doc(db, 'users', authUser.uid, 'library', String(t.id)), {
+                  ...cleanTrackForFirestore(t),
+                  userId: authUser.uid,
+                  savedAt: new Date().toISOString()
+                });
+              } catch (e) {
+                handleFirestoreError(e, 'write', `users/${authUser.uid}/library/${t.id}`);
+              }
+            }
+          }
+        }
+      },
+      error => {
+        handleFirestoreError(error, 'get', `users/${authUser.uid}/library`);
+      }
+    );
+
+    const likedCol = collection(db, 'users', authUser.uid, 'liked');
+    const unsubLiked = onSnapshot(
+      likedCol,
+      async snapshot => {
+        const serverLiked = [];
+        snapshot.forEach(docSnap => {
+          const d = docSnap.data();
+          serverLiked.push({
+            id: d.id || docSnap.id,
+            title: d.title,
+            name: d.title,
+            user: { name: d.artist || 'Artista' },
+            artist: d.artist,
+            duration: d.duration || 190,
+            artwork: { '_480x480': d.artworkUrl || d.image || art({}) },
+            sourceUrl: d.sourceUrl || null,
+            youtubeId: d.youtubeId || null
+          });
+        });
+
+        if (serverLiked.length > 0) {
+          setLiked(sanitizeList(serverLiked));
+        } else {
+          const localLiked = getStoredJSON('pm-liked', []);
+          if (Array.isArray(localLiked) && localLiked.length > 0) {
+            for (const t of localLiked.slice(0, 50)) {
+              try {
+                await setDoc(doc(db, 'users', authUser.uid, 'liked', String(t.id)), {
+                  ...cleanTrackForFirestore(t),
+                  userId: authUser.uid,
+                  savedAt: new Date().toISOString()
+                });
+              } catch (e) {
+                handleFirestoreError(e, 'write', `users/${authUser.uid}/liked/${t.id}`);
+              }
+            }
+          }
+        }
+      },
+      error => {
+        handleFirestoreError(error, 'get', `users/${authUser.uid}/liked`);
+      }
+    );
+
+    return () => {
+      unsubLib();
+      unsubLiked();
+    };
+  }, [authUser]);
+
+  const loginWithGoogle = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err) {
+      console.error('Google Sign-in error:', err);
+      if (err?.code !== 'auth/popup-closed-by-user' && err?.code !== 'auth/cancelled-popup-request') {
+        alert('Erro ao conectar com Google. Tente novamente.');
+      }
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+      setAuthUser(null);
+    } catch (err) {
+      console.error('Logout error:', err);
+    }
+  };
 
   useEffect(() => {
     fetch(API + '/tracks/trending?limit=12&app_name=' + APP)
@@ -852,9 +1109,37 @@ function App() {
   };
 
   const list = page === 'library' ? library : page === 'liked' ? liked : results;
-  const save = t => setLibrary(x => (x.some(a => a.id === t.id) ? x : [...x, t]));
-  const like = t =>
-    setLiked(x => (x.some(a => a.id === t.id) ? x.filter(a => a.id !== t.id) : [...x, t]));
+
+  const save = t => {
+    setLibrary(x => (x.some(a => a.id === t.id) ? x : [...x, t]));
+    if (authUser) {
+      setDoc(doc(db, 'users', authUser.uid, 'library', String(t.id)), {
+        ...cleanTrackForFirestore(t),
+        userId: authUser.uid,
+        savedAt: new Date().toISOString()
+      }).catch(e => handleFirestoreError(e, 'write', `users/${authUser.uid}/library/${t.id}`));
+    }
+  };
+
+  const like = t => {
+    setLiked(x => {
+      const isAlready = x.some(a => a.id === t.id);
+      if (authUser) {
+        if (isAlready) {
+          deleteDoc(doc(db, 'users', authUser.uid, 'liked', String(t.id))).catch(e =>
+            handleFirestoreError(e, 'delete', `users/${authUser.uid}/liked/${t.id}`)
+          );
+        } else {
+          setDoc(doc(db, 'users', authUser.uid, 'liked', String(t.id)), {
+            ...cleanTrackForFirestore(t),
+            userId: authUser.uid,
+            savedAt: new Date().toISOString()
+          }).catch(e => handleFirestoreError(e, 'write', `users/${authUser.uid}/liked/${t.id}`));
+        }
+      }
+      return isAlready ? x.filter(a => a.id !== t.id) : [...x, t];
+    });
+  };
 
   const importPlaylist = (ts, autoplay = true, meta = null) => {
     const sanitized = sanitizeList(ts);
@@ -874,6 +1159,15 @@ function App() {
       const filtered = prev.filter(p => p.id !== playlistId && p.name !== playlistTitle);
       return [newPlaylist, ...filtered];
     });
+
+    if (authUser) {
+      setDoc(
+        doc(db, 'users', authUser.uid, 'playlists', playlistId),
+        cleanPlaylistForFirestore(newPlaylist)
+      ).catch(err =>
+        handleFirestoreError(err, 'write', `users/${authUser.uid}/playlists/${playlistId}`)
+      );
+    }
 
     setLibrary(x => [...x, ...sanitized.filter(t => !x.some(a => a.id === t.id))]);
 
@@ -897,13 +1191,28 @@ function App() {
     if (selectedPlaylistId === id) {
       setPage('library');
     }
+    if (authUser) {
+      deleteDoc(doc(db, 'users', authUser.uid, 'playlists', id)).catch(err =>
+        handleFirestoreError(err, 'delete', `users/${authUser.uid}/playlists/${id}`)
+      );
+    }
   };
 
   const removeTrackFromPlaylist = (playlistId, trackId) => {
     setPlaylists(prev =>
       prev.map(pl => {
         if (pl.id !== playlistId) return pl;
-        return { ...pl, tracks: pl.tracks.filter(t => t.id !== trackId) };
+        const updated = { ...pl, tracks: pl.tracks.filter(t => t.id !== trackId) };
+        if (authUser) {
+          setDoc(
+            doc(db, 'users', authUser.uid, 'playlists', playlistId),
+            cleanPlaylistForFirestore(updated),
+            { merge: true }
+          ).catch(err =>
+            handleFirestoreError(err, 'write', `users/${authUser.uid}/playlists/${playlistId}`)
+          );
+        }
+        return updated;
       })
     );
   };
@@ -913,11 +1222,21 @@ function App() {
       prev.map(pl => {
         if (pl.id !== playlistId) return pl;
         if (pl.tracks.some(t => t.id === track.id)) return pl;
-        return {
+        const updated = {
           ...pl,
           image: pl.image || art(track),
           tracks: [...pl.tracks, track]
         };
+        if (authUser) {
+          setDoc(
+            doc(db, 'users', authUser.uid, 'playlists', playlistId),
+            cleanPlaylistForFirestore(updated),
+            { merge: true }
+          ).catch(err =>
+            handleFirestoreError(err, 'write', `users/${authUser.uid}/playlists/${playlistId}`)
+          );
+        }
+        return updated;
       })
     );
     setShowAddToPlaylistModal(null);
@@ -934,6 +1253,16 @@ function App() {
       createdAt: Date.now()
     };
     setPlaylists(prev => [newPl, ...prev]);
+
+    if (authUser) {
+      setDoc(
+        doc(db, 'users', authUser.uid, 'playlists', newId),
+        cleanPlaylistForFirestore(newPl)
+      ).catch(err =>
+        handleFirestoreError(err, 'write', `users/${authUser.uid}/playlists/${newId}`)
+      );
+    }
+
     setNewPlaylistModal(false);
     setNewPlaylistName('');
     setShowAddToPlaylistModal(null);
@@ -1056,12 +1385,147 @@ function App() {
                 placeholder="O que você quer ouvir hoje?"
               />
             </form>
-            <div className="profile">P</div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              {authLoading ? (
+                <div style={{ color: '#888', fontSize: 13, padding: '6px 12px' }}>Carregando...</div>
+              ) : authUser ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      background: '#161622',
+                      border: '1px solid #2d2d3e',
+                      borderRadius: 24,
+                      padding: '4px 12px 4px 6px'
+                    }}
+                    title={authUser.email}
+                  >
+                    {authUser.photoURL ? (
+                      <img
+                        src={authUser.photoURL}
+                        alt=""
+                        style={{ width: 28, height: 28, borderRadius: '50%', objectFit: 'cover' }}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          width: 28,
+                          height: 28,
+                          borderRadius: '50%',
+                          background: '#a855f7',
+                          color: '#fff',
+                          display: 'grid',
+                          placeItems: 'center',
+                          fontWeight: 700,
+                          fontSize: 13
+                        }}
+                      >
+                        {authUser.displayName?.[0] || 'U'}
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                      <span
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 700,
+                          color: '#fff',
+                          lineHeight: 1.2,
+                          maxWidth: 140,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap'
+                        }}
+                      >
+                        {authUser.displayName || authUser.email?.split('@')[0]}
+                      </span>
+                      <span
+                        style={{
+                          fontSize: 10,
+                          color: '#4ade80',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 4
+                        }}
+                      >
+                        <Cloud size={10} /> Nuvem Ativa
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={handleSignOut}
+                    title="Sair da conta Google"
+                    style={{
+                      background: 'transparent',
+                      border: '1px solid #333',
+                      color: '#bbb',
+                      borderRadius: 20,
+                      padding: '6px 12px',
+                      fontSize: 12,
+                      cursor: 'pointer',
+                      fontWeight: 600,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 4
+                    }}
+                  >
+                    <LogOut size={13} /> Sair
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={loginWithGoogle}
+                  style={{
+                    background: '#ffffff',
+                    color: '#111827',
+                    border: 0,
+                    borderRadius: 24,
+                    padding: '8px 16px',
+                    fontWeight: 700,
+                    fontSize: 13,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    boxShadow: '0 2px 10px rgba(0,0,0,0.3)',
+                    transition: 'all 0.2s'
+                  }}
+                  title="Salvar playlists e músicas na sua conta Google"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24">
+                    <path
+                      fill="#4285F4"
+                      d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                    />
+                    <path
+                      fill="#34A853"
+                      d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                    />
+                    <path
+                      fill="#FBBC05"
+                      d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
+                    />
+                    <path
+                      fill="#EA4335"
+                      d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
+                    />
+                  </svg>
+                  Entrar com Google
+                </button>
+              )}
+            </div>
           </header>
 
           <section className="content">
             {page === 'import' ? (
-              <ImportPanel onImport={importPlaylist} onPlay={p.play} />
+              <ImportPanel
+                onImport={importPlaylist}
+                onPlay={p.play}
+                authUser={authUser}
+                onGoogleLogin={loginWithGoogle}
+              />
             ) : page === 'home' ? (
               <>
                 <h1>Bem-vindo ao PobreMusic</h1>
@@ -1388,6 +1852,71 @@ function App() {
                     </button>
                   </div>
                 </div>
+
+                {!authUser ? (
+                  <div
+                    style={{
+                      background: 'linear-gradient(90deg, #1e1329 0%, #12121c 100%)',
+                      border: '1px solid #3c2656',
+                      borderRadius: 14,
+                      padding: '14px 18px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      flexWrap: 'wrap',
+                      gap: 12,
+                      marginBottom: 20
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                      <Cloud size={24} color="#c084fc" />
+                      <div>
+                        <b style={{ color: '#fff', fontSize: 14, display: 'block' }}>
+                          Mantenha suas playlists salvas na sua Conta Google
+                        </b>
+                        <span style={{ color: '#aaa', fontSize: 13 }}>
+                          Conecte sua conta para salvar suas músicas e playlists na nuvem e ouvi-las de qualquer lugar.
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      onClick={loginWithGoogle}
+                      style={{
+                        background: '#fff',
+                        color: '#111',
+                        border: 0,
+                        borderRadius: 20,
+                        padding: '8px 16px',
+                        fontWeight: 700,
+                        fontSize: 13,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6
+                      }}
+                    >
+                      Entrar com Google
+                    </button>
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      background: '#101c14',
+                      border: '1px solid #1a3c26',
+                      borderRadius: 12,
+                      padding: '10px 16px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      marginBottom: 20
+                    }}
+                  >
+                    <Cloud size={18} color="#4ade80" />
+                    <span style={{ fontSize: 13, color: '#86efac' }}>
+                      Sincronizado na nuvem com <b>{authUser.email}</b>. Suas playlists estão salvas com segurança.
+                    </span>
+                  </div>
+                )}
 
                 <div style={{ display: 'flex', gap: 10, borderBottom: '1px solid #222', paddingBottom: 14, marginBottom: 24 }}>
                   <button
@@ -2035,7 +2564,7 @@ function App() {
   );
 }
 
-function ImportPanel({ onImport, onPlay }) {
+function ImportPanel({ onImport, onPlay, authUser, onGoogleLogin }) {
   const [clientId, setClientId] = useState(
     () => localStorage.getItem('pm-spotify-client-id') || ''
   );
@@ -2388,6 +2917,63 @@ function ImportPanel({ onImport, onPlay }) {
       <h1>Importar Músicas & Playlists</h1>
 
       <div className="importCard">
+        {authUser ? (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              background: '#122218',
+              border: '1px solid #1e452c',
+              padding: '12px 18px',
+              borderRadius: 12,
+              marginBottom: 20
+            }}
+          >
+            <Cloud size={20} color="#4ade80" />
+            <span style={{ fontSize: 13, color: '#bbf7d0' }}>
+              Conectado como <b>{authUser.email}</b>. As playlists que você importar serão salvas diretamente na sua conta Google!
+            </span>
+          </div>
+        ) : (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12,
+              background: 'linear-gradient(90deg, #1d1428 0%, #12121b 100%)',
+              border: '1px solid #3c2656',
+              padding: '12px 18px',
+              borderRadius: 12,
+              marginBottom: 20,
+              flexWrap: 'wrap'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Cloud size={20} color="#c084fc" />
+              <span style={{ fontSize: 13, color: '#e9d5ff' }}>
+                Entre com o Google para que todas as playlists importadas fiquem salvas na nuvem da sua conta.
+              </span>
+            </div>
+            <button
+              onClick={onGoogleLogin}
+              style={{
+                background: '#fff',
+                color: '#111',
+                border: 0,
+                borderRadius: 20,
+                padding: '7px 16px',
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: 'pointer'
+              }}
+            >
+              Entrar com Google
+            </button>
+          </div>
+        )}
+
         {/* Navigation Tabs */}
         <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
           <button
