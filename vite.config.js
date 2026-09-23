@@ -94,9 +94,9 @@ const musicApiPlugin = () => ({
         }
 
         const norm = value =>
-          (value || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+          (value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
         const bad = value =>
-          /\\b(cover|karaoke|acapella|a cappella|instrumental|remix|rework|bootleg|edit|sped up|slowed|nightcore|version|tribute|dublagem|parodia|parody|live|ao vivo)\\b/i.test(value || '');
+          /\b(cover|karaoke|acapella|a cappella|instrumental|remix|rework|bootleg|edit|sped up|slowed|nightcore|version|tribute|dublagem|parodia|parody|live|ao vivo)\b/i.test(value || '');
         const wantedTitle = norm(title);
         const wantedArtist = norm(artist);
         const queries = [q, title, [title, artist].filter(Boolean).join(' ')].filter(Boolean);
