@@ -1,25 +1,10 @@
-// PobreMusic Service Worker - Background Audio & PWA Support
-const CACHE_NAME = 'pobremusic-v1';
-
+// PobreMusic service worker.
+// Keep the worker minimal: Pages already handles asset caching, while audio/API
+// requests must remain network-first and should not be intercepted here.
 self.addEventListener('install', event => {
   self.skipWaiting();
 });
 
 self.addEventListener('activate', event => {
   event.waitUntil(self.clients.claim());
-});
-
-self.addEventListener('fetch', event => {
-  // Let network handle audio streams and dynamic requests directly
-  if (
-    event.request.url.includes('/api/') ||
-    event.request.url.includes('audius.co') ||
-    event.request.url.includes('googlevideo.com') ||
-    event.request.url.includes('spotify.com')
-  ) {
-    return;
-  }
-  event.respondWith(
-    fetch(event.request).catch(() => caches.match(event.request))
-  );
 });
