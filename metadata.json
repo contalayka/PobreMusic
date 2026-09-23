@@ -1,0 +1,9 @@
+{
+  "name": "PobreMusic",
+  "description": "Player de música online gratuito e biblioteca musical otimizada para Cloudflare Pages",
+  "version": "1.0.0",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
