@@ -826,7 +826,7 @@ function Player({ queue, setQueue }) {
         ref.current.src = audioUrl;
         ref.current.volume = vol;
         ref.current.play().catch(err => {
-          console.warn('Audio play failed, falling back to YouTube:', err);
+          console.warn('Audio play failed, falling back to supported source:', err);
           fallbackToSource(t);
         });
       }
@@ -871,14 +871,14 @@ function Player({ queue, setQueue }) {
         ref.current.volume = vol;
         ref.current.play().catch(err => {
           console.warn('Audius play error, falling back:', err);
-          fallbackToYouTube(updatedTrack);
+          fallbackToSource(updatedTrack);
         });
       }
       return;
     }
 
-    // 4. Fallback to YouTube
-    await fallbackToYouTube(t);
+    // 4. Fallback to supported Audius source
+    await fallbackToSource(t);
     setLoadingTrack(false);
   };
 
@@ -2841,7 +2841,7 @@ function App() {
                 src={p.src}
                 onError={() => {
                   console.warn('Audio playback error, switching to alternative stream');
-                  if (p.track) p.fallbackToYouTube(p.track);
+                  if (p.track) p.fallbackToSource(p.track);
                 }}
               />
             </>
