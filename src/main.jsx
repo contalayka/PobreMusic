@@ -820,19 +820,10 @@ function Player({ queue, setQueue }) {
 
     // 1. Direct audio check (Audius tracks or direct audio streams)
     const hasDirectAudio = t.sourceUrl && !isSpotifyPreview(t.sourceUrl);
-    const isAudiusId =
-      t.id &&
-      !String(t.id).startsWith('sp_') &&
-      !String(t.id).startsWith('tr_') &&
-      !String(t.id).startsWith('yt_') &&
-      !String(t.id).startsWith('txt_') &&
-      !t.youtubeId &&
-      !t.spotifyUri;
-
-    if (hasDirectAudio || isAudiusId) {
-      const audioUrl = hasDirectAudio
-        ? t.sourceUrl
-        : API + '/tracks/' + t.id + '/stream?app_name=' + APP;
+    // Never infer a provider from a generic ID. Spotify IDs are also 22-character
+    // strings, so treating every ID as an Audius ID can play the wrong track or fail.
+    if (hasDirectAudio) {
+      const audioUrl = t.sourceUrl;
       setMode('audio');
       setSrc(audioUrl);
       setPlaying(true);
@@ -1266,7 +1257,8 @@ function App() {
             duration: d.duration || 190,
             artwork: { '_480x480': d.artworkUrl || d.image || art({}) },
             sourceUrl: d.sourceUrl || null,
-            youtubeId: d.youtubeId || null
+            youtubeId: d.youtubeId || null,
+            spotifyUri: d.spotifyUri || null
           });
         });
 
