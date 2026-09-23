@@ -338,7 +338,7 @@ function Player({ queue, setQueue }) {
   const deviceRef = useRef('');
 
   const [track, setTrack] = useState(null);
-  const [src, setSrc] = useState('');
+  const [src, setSrc] = useState(null);
   const [playing, setPlaying] = useState(false);
   const [time, setTime] = useState(0);
   const [dur, setDur] = useState(0);
@@ -1812,7 +1812,7 @@ function App() {
                   >
                     {authUser.photoURL ? (
                       <img
-                        src={authUser.photoURL}
+                        src={authUser.photoURL || null}
                         alt=""
                         style={{ width: 28, height: 28, borderRadius: '50%', objectFit: 'cover' }}
                       />
@@ -2143,7 +2143,7 @@ function App() {
                       }}
                     >
                       <img
-                        src={coverArt}
+                        src={coverArt || null}
                         alt=""
                         style={{
                           width: 170,
@@ -2464,7 +2464,7 @@ function App() {
                               }}
                             >
                               <img
-                                src={plArt}
+                                src={plArt || null}
                                 alt=""
                                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                               />
@@ -2844,7 +2844,7 @@ function App() {
               />
               <audio
                 ref={p.ref}
-                src={p.src}
+                src={p.src || null}
                 onError={() => {
                   console.warn('Audio playback error, switching to alternative stream');
                   if (p.track) p.fallbackToSource(p.track);
@@ -4160,7 +4160,7 @@ function ImportPanel({ onImport, onPlay, authUser, onGoogleLogin }) {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                 {playlistMeta?.image && (
-                  <img src={playlistMeta.image} alt="" style={{ width: 48, height: 48, borderRadius: 8, objectFit: 'cover' }} />
+                  <img src={playlistMeta.image || null} alt="" style={{ width: 48, height: 48, borderRadius: 8, objectFit: 'cover' }} />
                 )}
                 <div>
                   <h3 style={{ margin: 0, fontSize: 18 }}>{playlistMeta?.name || 'Faixas da Playlist'}</h3>
