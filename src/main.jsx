@@ -153,37 +153,40 @@ const smartMatch = (t, title, artist) => {
 
 const resolveAudiusTrack = async (artist, title) => {
   const q = `${artist} ${title}`.trim();
-  if (!q) return null;
-  const cacheKey = norm(q);
+  if (!q && !title) return null;
+  const cacheKey = norm(q || title);
   const cache = getStoredJSON('pm-audius-cache', {});
   if (cache[cacheKey] && cache[cacheKey].id) {
     return cache[cacheKey];
   }
 
-  try {
-    const r = await fetch(
-      API + '/tracks/search?query=' + encodeURIComponent(q) + '&limit=15&app_name=' + APP
-    );
-    if (r.ok) {
-      const j = await r.json();
-      const hits = (j.data || []).filter(x => (x.duration || 0) > 40);
-      const match = hits.find(x => smartMatch(x, title, artist)) || hits[0];
-      if (match) {
-        const item = {
-          id: match.id,
-          sourceUrl: API + '/tracks/' + match.id + '/stream?app_name=' + APP,
-          duration: match.duration || 180,
-          title: match.title,
-          artwork: match.artwork
-        };
-        cache[cacheKey] = item;
-        try {
-          localStorage.setItem('pm-audius-cache', JSON.stringify(cache));
-        } catch {}
-        return item;
+  const queries = [q, title, `${title} ${artist}`].filter(Boolean);
+  for (const query of queries) {
+    try {
+      const r = await fetch(
+        API + '/tracks/search?query=' + encodeURIComponent(query) + '&limit=15&app_name=' + APP
+      );
+      if (r.ok) {
+        const j = await r.json();
+        const hits = (j.data || []).filter(x => (x.duration || 0) > 40);
+        const match = hits.find(x => smartMatch(x, title, artist)) || (hits.length > 0 ? hits[0] : null);
+        if (match) {
+          const item = {
+            id: match.id,
+            sourceUrl: API + '/tracks/' + match.id + '/stream?app_name=' + APP,
+            duration: match.duration || 180,
+            title: match.title,
+            artwork: match.artwork
+          };
+          cache[cacheKey] = item;
+          try {
+            localStorage.setItem('pm-audius-cache', JSON.stringify(cache));
+          } catch {}
+          return item;
+        }
       }
-    }
-  } catch (e) {}
+    } catch (e) {}
+  }
   return null;
 };
 
@@ -295,6 +298,31 @@ function Player({ queue, setQueue }) {
   const [mode, setMode] = useState('audio'); // 'audio' | 'yt' | 'spotify'
   const [loadingTrack, setLoadingTrack] = useState(false);
 
+  const userWantsPlayRef = useRef(false);
+  const audioContextRef = useRef(null);
+
+  // Initialize Web Audio continuous keep-alive on user interaction
+  const initWebAudioKeepAlive = () => {
+    try {
+      if (!audioContextRef.current) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) {
+          const ctx = new AudioCtx();
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          gain.gain.value = 0.00001; // virtually silent keepalive to prevent mobile OS DAC sleep
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start();
+          audioContextRef.current = ctx;
+        }
+      }
+      if (audioContextRef.current?.state === 'suspended') {
+        audioContextRef.current.resume().catch(() => {});
+      }
+    } catch (e) {}
+  };
+
   repeatRef.current = repeat;
 
   // Listen to postMessage events from YouTube embed player
@@ -312,8 +340,19 @@ function Player({ queue, setQueue }) {
           }
           if (d.info.playerState === 1) {
             setPlaying(true);
+            userWantsPlayRef.current = true;
+            window.__keepBackgroundAudioPlaying = true;
           } else if (d.info.playerState === 2) {
-            setPlaying(false);
+            if (userWantsPlayRef.current) {
+              const iframe = document.getElementById('yt-embed-player');
+              iframe?.contentWindow?.postMessage(
+                JSON.stringify({ event: 'command', func: 'playVideo', args: [] }),
+                '*'
+              );
+            } else {
+              setPlaying(false);
+              window.__keepBackgroundAudioPlaying = false;
+            }
           } else if (d.info.playerState === 0) {
             if (repeatRef.current) {
               seek(0);
@@ -326,9 +365,22 @@ function Player({ queue, setQueue }) {
             setDur(d.info.duration);
           }
         } else if (d.event === 'onStateChange') {
-          if (d.info === 1) setPlaying(true);
-          else if (d.info === 2) setPlaying(false);
-          else if (d.info === 0) {
+          if (d.info === 1) {
+            setPlaying(true);
+            userWantsPlayRef.current = true;
+            window.__keepBackgroundAudioPlaying = true;
+          } else if (d.info === 2) {
+            if (userWantsPlayRef.current) {
+              const iframe = document.getElementById('yt-embed-player');
+              iframe?.contentWindow?.postMessage(
+                JSON.stringify({ event: 'command', func: 'playVideo', args: [] }),
+                '*'
+              );
+            } else {
+              setPlaying(false);
+              window.__keepBackgroundAudioPlaying = false;
+            }
+          } else if (d.info === 0) {
             if (repeatRef.current) seek(0);
             else next();
           }
@@ -349,6 +401,12 @@ function Player({ queue, setQueue }) {
         const iframe = document.getElementById('yt-embed-player');
         if (iframe?.contentWindow) {
           try {
+            if (userWantsPlayRef.current) {
+              iframe.contentWindow.postMessage(
+                JSON.stringify({ event: 'command', func: 'playVideo', args: [] }),
+                '*'
+              );
+            }
             iframe.contentWindow.postMessage(
               JSON.stringify({ event: 'command', func: 'getCurrentTime', args: [] }),
               '*'
@@ -500,9 +558,14 @@ function Player({ queue, setQueue }) {
       navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
 
       navigator.mediaSession.setActionHandler('play', () => {
+        initWebAudioKeepAlive();
+        userWantsPlayRef.current = true;
+        window.__keepBackgroundAudioPlaying = true;
         togglePlay();
       });
       navigator.mediaSession.setActionHandler('pause', () => {
+        userWantsPlayRef.current = false;
+        window.__keepBackgroundAudioPlaying = false;
         togglePlay();
       });
       navigator.mediaSession.setActionHandler('previoustrack', () => {
@@ -594,6 +657,9 @@ function Player({ queue, setQueue }) {
       if (resolved.duration) setDur(resolved.duration);
     }
     if (resolved.youtubeId) {
+      initWebAudioKeepAlive();
+      userWantsPlayRef.current = true;
+      window.__keepBackgroundAudioPlaying = true;
       setMode('yt');
       setPlaying(true);
       if (ref.current) {
@@ -607,6 +673,9 @@ function Player({ queue, setQueue }) {
 
   const startPlayback = async (t, i) => {
     if (!t) return;
+    initWebAudioKeepAlive();
+    userWantsPlayRef.current = true;
+    window.__keepBackgroundAudioPlaying = true;
     setIdx(i);
     setTrack(t);
     setTime(0);
@@ -743,7 +812,10 @@ function Player({ queue, setQueue }) {
 
   const togglePlay = () => {
     if (!track) return;
+    initWebAudioKeepAlive();
     const nextPlaying = !playing;
+    userWantsPlayRef.current = nextPlaying;
+    window.__keepBackgroundAudioPlaying = nextPlaying;
     setPlaying(nextPlaying);
 
     if (mode === 'yt') {
@@ -2381,11 +2453,11 @@ function App() {
             position: 'fixed',
             bottom: 0,
             right: 0,
-            width: '200px',
-            height: '200px',
-            opacity: 0.0001,
+            width: '2px',
+            height: '2px',
+            opacity: 1,
             pointerEvents: 'none',
-            zIndex: -9999,
+            zIndex: 1,
             overflow: 'hidden'
           }}
           aria-hidden="true"
