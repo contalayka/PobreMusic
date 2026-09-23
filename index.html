@@ -15,26 +15,7 @@
     <meta property="og:title" content="PobreMusic" />
     <meta property="og:description" content="Player de música online gratuito e biblioteca musical otimizada para Cloudflare Pages" />
     <title>PobreMusic</title>
-    <script>
-      // Page Visibility override: Prevents background playback suspension on lock screen
-      try {
-        Object.defineProperty(document, 'hidden', {
-          get: () => false,
-          configurable: true
-        });
-        Object.defineProperty(document, 'visibilityState', {
-          get: () => 'visible',
-          configurable: true
-        });
-        const stopVisibilityHandler = function(e) {
-          if (window.__keepBackgroundAudioPlaying) {
-            e.stopImmediatePropagation();
-          }
-        };
-        window.addEventListener('visibilitychange', stopVisibilityHandler, true);
-        document.addEventListener('visibilitychange', stopVisibilityHandler, true);
-      } catch (e) {}
-    </script>
+
   </head>
   <body>
     <div id="root"></div>
