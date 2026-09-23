@@ -812,7 +812,8 @@ function Player({ queue, setQueue }) {
       !String(t.id).startsWith('tr_') &&
       !String(t.id).startsWith('yt_') &&
       !String(t.id).startsWith('txt_') &&
-      !t.youtubeId;
+      !t.youtubeId &&
+      !t.spotifyUri;
 
     if (hasDirectAudio || isAudiusId) {
       const audioUrl = hasDirectAudio
