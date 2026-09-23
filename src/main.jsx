@@ -81,11 +81,12 @@ const resolveFullAudio = async t => {
 
   const cacheKey = norm(`${artist} ${title}`);
   const cache = getStoredJSON('pm-full-audio-cache', {});
-  if (cache[cacheKey] && cache[cacheKey].videoId) {
+  if (cache[cacheKey] && cache[cacheKey].sourceUrl) {
     return {
       ...t,
-      youtubeId: cache[cacheKey].videoId,
-      duration: cache[cacheKey].duration || t.duration || 180
+      sourceUrl: cache[cacheKey].sourceUrl,
+      duration: cache[cacheKey].duration || t.duration || 180,
+      artwork: t.artwork || cache[cacheKey].artwork
     };
   }
 
@@ -93,15 +94,16 @@ const resolveFullAudio = async t => {
     const res = await fetch(`/api/full-audio?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(title)}`);
     if (res.ok) {
       const data = await res.json();
-      if (data.videoId) {
-        cache[cacheKey] = { videoId: data.videoId, duration: data.duration };
+      if (data.sourceUrl) {
+        cache[cacheKey] = { sourceUrl: data.sourceUrl, duration: data.duration, artwork: data.artwork };
         try {
           localStorage.setItem('pm-full-audio-cache', JSON.stringify(cache));
         } catch {}
         return {
           ...t,
-          youtubeId: data.videoId,
-          duration: data.duration || t.duration || 180
+          sourceUrl: data.sourceUrl,
+          duration: data.duration || t.duration || 180,
+          artwork: t.artwork || data.artwork
         };
       }
     }
@@ -476,6 +478,20 @@ function Player({ queue, setQueue }) {
           }
           return nextTime;
         });
+      } else if (mode === 'spotify') {
+        setTime(prev => {
+          const totalDur = dur || track?.duration || 0;
+          const nextTime = +(prev + 0.5).toFixed(1);
+          if (totalDur > 0 && nextTime >= totalDur) {
+            if (repeatRef.current) {
+              spotifyRef.current?.seek(0).catch(() => {});
+              return 0;
+            }
+            next();
+            return 0;
+          }
+          return nextTime;
+        });
       } else if (mode === 'audio' && ref.current) {
         if (!ref.current.paused && ref.current.currentTime != null && !isNaN(ref.current.currentTime)) {
           setTime(ref.current.currentTime);
@@ -568,9 +584,6 @@ function Player({ queue, setQueue }) {
           if (current?.uri && track?.spotifyUri && current.uri !== track.spotifyUri) {
             const nextTrack = queue.find(q => q.spotifyUri === current.uri);
             if (nextTrack) setTrack(nextTrack);
-          }
-          if (state.paused && state.duration > 0 && state.position >= state.duration - 500 && !repeatRef.current) {
-            setTimeout(() => next(), 0);
           }
         });
 
@@ -1408,26 +1421,8 @@ function App() {
         }
       } catch {}
 
-      // Complement with full audio match if not many results
-      if (c.length < 8) {
-        try {
-          const ytRes = await fetch(`/api/full-audio?q=${encodeURIComponent(term)}`);
-          if (ytRes.ok) {
-            const ytData = await ytRes.json();
-            if (ytData.videoId && !c.some(x => x.youtubeId === ytData.videoId)) {
-              const fullSong = {
-                id: 'yt_' + ytData.videoId,
-                youtubeId: ytData.videoId,
-                title: ytData.title || term,
-                user: { name: term },
-                duration: ytData.duration || 210,
-                artwork: { '_480x480': `https://i.ytimg.com/vi/${ytData.videoId}/hqdefault.jpg` }
-              };
-              c.unshift(fullSong);
-            }
-          }
-        } catch {}
-      }
+      // Audius is the only automatic audio resolver here.
+      // Protected-platform audio is never extracted or proxied.
 
       setResults(c);
       setPage('search');
@@ -3878,24 +3873,8 @@ function ImportPanel({ onImport, onPlay, authUser, onGoogleLogin }) {
       }
     } catch {}
 
-    try {
-      const res = await fetch(`/api/full-audio?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(title)}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.videoId) {
-          const hit = {
-            id: 'yt_' + data.videoId,
-            youtubeId: data.videoId,
-            title: title || data.title,
-            user: { name: artist },
-            duration: data.duration || 210,
-            artwork: { '_480x480': `https://i.ytimg.com/vi/${data.videoId}/hqdefault.jpg` }
-          };
-          setFound(hit);
-          setStatus('Música encontrada com sucesso (áudio completo YouTube)!');
-          return;
-        }
-      }
+    // No protected-platform extraction fallback: the Audius resolver above is the supported source.
+
     } catch {}
 
     setStatus('Nenhuma gravação compatível encontrada.');
