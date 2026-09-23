@@ -29,7 +29,8 @@ import {
   X,
   Cloud,
   UserCheck,
-  ChevronDown
+  ChevronDown,
+  Smartphone
 } from 'lucide-react';
 import './styles.css';
 
@@ -451,8 +452,14 @@ function Player({ queue, setQueue }) {
         next();
       }
     };
-    const onPlay = () => setPlaying(true);
-    const onPause = () => setPlaying(false);
+    const onPlay = () => {
+      setPlaying(true);
+    };
+    const onPause = () => {
+      if (mode === 'audio' && !userWantsPlayRef.current) {
+        setPlaying(false);
+      }
+    };
 
     e.addEventListener('timeupdate', a);
     e.addEventListener('loadedmetadata', b);
@@ -956,6 +963,46 @@ function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [cloudSynced, setCloudSynced] = useState(false);
   const [authErrorModal, setAuthErrorModal] = useState(null);
+  const [installPrompt, setInstallPrompt] = useState(null);
+  const [isAppInstalled, setIsAppInstalled] = useState(false);
+  const [showApkModal, setShowApkModal] = useState(false);
+
+  useEffect(() => {
+    const handleBeforeInstall = e => {
+      e.preventDefault();
+      setInstallPrompt(e);
+    };
+    const handleAppInstalled = () => {
+      setIsAppInstalled(true);
+      setInstallPrompt(null);
+    };
+    window.addEventListener('beforeinstallprompt', handleBeforeInstall);
+    window.addEventListener('appinstalled', handleAppInstalled);
+
+    if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone) {
+      setIsAppInstalled(true);
+    }
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
+      window.removeEventListener('appinstalled', handleAppInstalled);
+    };
+  }, []);
+
+  const handleInstallApp = async () => {
+    if (installPrompt) {
+      installPrompt.prompt();
+      const choice = await installPrompt.userChoice;
+      if (choice && choice.outcome === 'accepted') {
+        setIsAppInstalled(true);
+        setInstallPrompt(null);
+        setShowApkModal(false);
+      }
+    } else {
+      const currentUrl = window.location.origin;
+      window.open(`https://www.pwabuilder.com/?site=${encodeURIComponent(currentUrl)}`, '_blank');
+    }
+  };
 
   // Clean data helpers to prevent Firestore undefined errors
   const cleanTrackForFirestore = t => ({
@@ -1560,6 +1607,46 @@ function App() {
               </div>
             </div>
           )}
+
+          {/* Android APK Download Card in Sidebar */}
+          <div
+            onClick={() => setShowApkModal(true)}
+            style={{
+              marginTop: 'auto',
+              margin: '16px 12px 8px',
+              padding: '12px 14px',
+              background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.16) 0%, rgba(5, 150, 105, 0.08) 100%)',
+              border: '1px solid rgba(16, 185, 129, 0.35)',
+              borderRadius: 14,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              transition: 'all 0.2s'
+            }}
+          >
+            <div
+              style={{
+                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                color: '#fff',
+                borderRadius: '50%',
+                width: 34,
+                height: 34,
+                display: 'grid',
+                placeItems: 'center',
+                flexShrink: 0,
+                boxShadow: '0 2px 8px rgba(16, 185, 129, 0.35)'
+              }}
+            >
+              <Smartphone size={18} />
+            </div>
+            <div style={{ overflow: 'hidden' }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#fff', display: 'flex', alignItems: 'center', gap: 4 }}>
+                Baixar APK / App
+              </div>
+              <div style={{ fontSize: 11, color: '#34d399', fontWeight: 600 }}>Tocar em 2º plano</div>
+            </div>
+          </div>
         </aside>
 
         <main>
@@ -1587,6 +1674,30 @@ function App() {
             </form>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              {/* Baixar APK / Instalar App Header Button */}
+              <button
+                onClick={() => setShowApkModal(true)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                  color: '#fff',
+                  border: 0,
+                  borderRadius: 20,
+                  padding: '7px 14px',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                  boxShadow: '0 2px 8px rgba(16, 185, 129, 0.28)'
+                }}
+                title="Baixar APK / Instalar App Android"
+              >
+                <Smartphone size={15} />
+                <span className="apk-btn-text">Baixar APK</span>
+              </button>
+
               {authLoading ? (
                 <div style={{ color: '#888', fontSize: 13, padding: '6px 12px' }}>Carregando...</div>
               ) : authUser ? (
@@ -1728,6 +1839,70 @@ function App() {
               />
             ) : page === 'home' ? (
               <>
+                {/* Banner Mobile de Download do APK */}
+                <div
+                  onClick={() => setShowApkModal(true)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.2) 0%, rgba(5, 150, 105, 0.12) 100%)',
+                    border: '1px solid rgba(16, 185, 129, 0.4)',
+                    borderRadius: 14,
+                    padding: '12px 16px',
+                    marginBottom: 20,
+                    cursor: 'pointer',
+                    boxShadow: '0 4px 16px rgba(16, 185, 129, 0.15)'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <div
+                      style={{
+                        background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                        color: '#fff',
+                        width: 40,
+                        height: 40,
+                        borderRadius: 12,
+                        display: 'grid',
+                        placeItems: 'center',
+                        flexShrink: 0,
+                        boxShadow: '0 2px 8px rgba(16, 185, 129, 0.35)'
+                      }}
+                    >
+                      <Smartphone size={22} />
+                    </div>
+                    <div>
+                      <div style={{ fontWeight: 800, fontSize: 14, color: '#fff', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        Baixar Aplicativo Android (APK)
+                        <span style={{ fontSize: 10, background: '#10b981', color: '#000', padding: '2px 6px', borderRadius: 10, fontWeight: 800 }}>NOVO</span>
+                      </div>
+                      <div style={{ fontSize: 12, color: '#6ee7b7', marginTop: 2 }}>
+                        Instale para ouvir em segundo plano com a tela bloqueada
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={e => {
+                      e.stopPropagation();
+                      setShowApkModal(true);
+                    }}
+                    style={{
+                      background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                      color: '#fff',
+                      border: 0,
+                      borderRadius: 20,
+                      padding: '8px 16px',
+                      fontSize: 13,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      whiteSpace: 'nowrap',
+                      boxShadow: '0 2px 8px rgba(16, 185, 129, 0.3)'
+                    }}
+                  >
+                    Instalar
+                  </button>
+                </div>
+
                 <h1>Bem-vindo ao PobreMusic</h1>
                 <div className="hero">
                   <div>
@@ -2451,13 +2626,13 @@ function App() {
         <div
           style={{
             position: 'fixed',
-            bottom: 0,
-            right: 0,
-            width: '2px',
-            height: '2px',
-            opacity: 1,
+            top: 0,
+            left: 0,
+            width: '100vw',
+            height: '100vh',
+            opacity: 0.001,
             pointerEvents: 'none',
-            zIndex: 1,
+            zIndex: -999,
             overflow: 'hidden'
           }}
           aria-hidden="true"
@@ -2474,7 +2649,7 @@ function App() {
             }}
             src={
               p.mode === 'yt' && p.track?.youtubeId
-                ? `https://www.youtube.com/embed/${p.track.youtubeId}?autoplay=1&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}`
+                ? `https://www.youtube.com/embed/${p.track.youtubeId}?autoplay=1&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}&controls=0&disablekb=1&fs=0&rel=0`
                 : 'about:blank'
             }
             title="Audio Stream"
@@ -2614,6 +2789,15 @@ function App() {
           >
             <Download size={22} />
             <span>Importar</span>
+          </button>
+          <button
+            className="mobile-nav-item"
+            onClick={() => setShowApkModal(true)}
+            style={{ color: '#34d399' }}
+            title="Baixar APK para ouvir em segundo plano"
+          >
+            <Smartphone size={22} />
+            <span style={{ fontWeight: 800, color: '#34d399' }}>App APK</span>
           </button>
         </nav>
 
@@ -2761,9 +2945,27 @@ function App() {
               </button>
             </div>
 
-            <div className="background-badge">
-              <div className="pulse-dot" />
-              <span>Toca em 2º plano com tela bloqueada</span>
+            <div
+              className="background-badge"
+              onClick={() => setShowApkModal(true)}
+              style={{
+                cursor: 'pointer',
+                background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.25) 0%, rgba(5, 150, 105, 0.15) 100%)',
+                border: '1px solid #10b981',
+                padding: '10px 18px',
+                borderRadius: 24,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+                boxShadow: '0 4px 14px rgba(16, 185, 129, 0.25)',
+                margin: '0 auto'
+              }}
+              title="Toque para baixar o APK e ouvir com tela bloqueada"
+            >
+              <Smartphone size={16} color="#34d399" />
+              <span style={{ fontWeight: 700, color: '#ecfdf5', fontSize: 13 }}>
+                Baixar APK para tocar com tela apagada
+              </span>
             </div>
           </div>
         )}
@@ -3090,6 +3292,160 @@ function App() {
                   }}
                 >
                   Entendi
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* Modal: Baixar Aplicativo Android (APK) */}
+        {showApkModal && (
+          <div className="modal-overlay" onClick={() => setShowApkModal(false)}>
+            <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 480 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <div
+                    style={{
+                      background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                      color: '#fff',
+                      width: 36,
+                      height: 36,
+                      borderRadius: 10,
+                      display: 'grid',
+                      placeItems: 'center',
+                      boxShadow: '0 2px 8px rgba(16, 185, 129, 0.35)'
+                    }}
+                  >
+                    <Smartphone size={20} />
+                  </div>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: 18, color: '#fff', fontWeight: 800 }}>
+                      Baixar Aplicativo Android (APK)
+                    </h3>
+                    <span style={{ fontSize: 11, color: '#34d399', fontWeight: 600 }}>
+                      Reprodução em segundo plano com tela bloqueada
+                    </span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowApkModal(false)}
+                  style={{ background: 'transparent', border: 0, color: '#888', cursor: 'pointer', padding: 4 }}
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div
+                style={{
+                  background: 'rgba(16, 185, 129, 0.08)',
+                  border: '1px solid rgba(16, 185, 129, 0.25)',
+                  borderRadius: 12,
+                  padding: '12px 14px',
+                  marginBottom: 16
+                }}
+              >
+                <p style={{ margin: 0, fontSize: 13, lineHeight: 1.5, color: '#e4e4e7' }}>
+                  Ao instalar o <b>PobreMusic</b> como app nativo no celular, o Android concede permissões completas de <b>Áudio em Primeiro Plano</b>. As músicas não param quando a tela apagar ou você alternar entre outros aplicativos.
+                </p>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
+                {/* Botão de Instalação Nativa WebAPK */}
+                <button
+                  onClick={handleInstallApp}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 8,
+                    background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                    color: '#fff',
+                    border: 0,
+                    borderRadius: 12,
+                    padding: '14px 18px',
+                    fontSize: 14,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    boxShadow: '0 4px 12px rgba(16, 185, 129, 0.3)'
+                  }}
+                >
+                  <Smartphone size={18} />
+                  {isAppInstalled
+                    ? 'Aplicativo Já Instalado no Celular'
+                    : installPrompt
+                    ? 'Instalar App Direto no Celular (Automático)'
+                    : 'Instalar Aplicativo Oficial (APK)'}
+                </button>
+
+                {/* Botão PWABuilder para gerar pacote APK */}
+                <a
+                  href={`https://www.pwabuilder.com/?site=${encodeURIComponent(window.location.origin)}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 8,
+                    background: '#161620',
+                    color: '#c084fc',
+                    border: '1px solid #36284e',
+                    borderRadius: 12,
+                    padding: '12px 18px',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    textDecoration: 'none',
+                    cursor: 'pointer'
+                  }}
+                >
+                  <Download size={16} />
+                  Gerar Pacote APK Completo via PWABuilder ↗
+                </a>
+              </div>
+
+              {/* Guia Passo a Passo no Android */}
+              <div
+                style={{
+                  background: '#0d0d12',
+                  border: '1px solid #22222e',
+                  borderRadius: 12,
+                  padding: '14px 16px',
+                  marginBottom: 16
+                }}
+              >
+                <b style={{ color: '#fff', fontSize: 13, display: 'block', marginBottom: 8 }}>
+                  Como instalar manualmente no Chrome (Android):
+                </b>
+                <ol style={{ paddingLeft: 18, margin: 0, fontSize: 12, color: '#a1a1aa', lineHeight: 1.6 }}>
+                  <li style={{ marginBottom: 4 }}>
+                    Abra o <b>PobreMusic</b> no <b>Google Chrome</b> do celular.
+                  </li>
+                  <li style={{ marginBottom: 4 }}>
+                    Toque nos <b>3 pontinhos (⋮)</b> no canto superior direito do navegador.
+                  </li>
+                  <li style={{ marginBottom: 4 }}>
+                    Selecione <b>"Instalar aplicativo"</b> (ou <i>"Adicionar à tela inicial"</i>).
+                  </li>
+                  <li>
+                    O Android cria o <b>APK oficial</b> na lista de aplicativos com ícone próprio e áudio em segundo plano!
+                  </li>
+                </ol>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                <button
+                  onClick={() => setShowApkModal(false)}
+                  style={{
+                    background: '#222',
+                    border: '1px solid #333',
+                    color: '#fff',
+                    borderRadius: 20,
+                    padding: '8px 20px',
+                    fontSize: 13,
+                    cursor: 'pointer',
+                    fontWeight: 600
+                  }}
+                >
+                  Fechar
                 </button>
               </div>
             </div>

@@ -7,6 +7,7 @@ import {
   onAuthStateChanged
 } from 'firebase/auth';
 import {
+  initializeFirestore,
   getFirestore,
   doc,
   getDoc,
@@ -21,20 +22,29 @@ import firebaseConfig from '../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
 
-// CRITICAL: The app will break without specifying firestoreDatabaseId
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+// CRITICAL: Initialize Firestore with experimentalAutoDetectLongPolling
+// and firestoreDatabaseId to prevent WebSocket dropouts and 'unavailable' errors in web/iframe
+export const db = initializeFirestore(
+  app,
+  {
+    experimentalAutoDetectLongPolling: true
+  },
+  firebaseConfig.firestoreDatabaseId
+);
 export const auth = getAuth(app);
 
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
-// Test connection on boot
+// Test connection on boot gracefully without crashing when offline
 export async function testConnection() {
   try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
+    if (auth.currentUser) {
+      await getDocFromServer(doc(db, 'users', auth.currentUser.uid));
+    }
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
+      console.warn('Firebase client operating in offline mode.');
     }
   }
 }
