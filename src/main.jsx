@@ -79,7 +79,7 @@ const resolveFullAudio = async t => {
   const title = t.name || t.title || '';
   if (!title) return t;
 
-  const cacheKey = norm(`${artist} ${title}`);
+  const cacheKey = 'v2:' + norm(`${artist} ${title}`);
   const cache = getStoredJSON('pm-full-audio-cache', {});
   if (cache[cacheKey] && cache[cacheKey].sourceUrl) {
     return {
@@ -145,19 +145,18 @@ const smartMatch = (t, title, artist) => {
     titleWords.length > 0 ? titleWords.every(w => normT.includes(w)) : normT.includes(normTitle);
   if (!hasTitle) return false;
 
-  const artistWords = normArtist.split(' ').filter(w => w.length > 2);
+  const artistNames = names(t);
   const hasArtist =
-    artistWords.length > 0
-      ? artistWords.some(w => normT.includes(w) || names(t).some(a => a.includes(w)))
-      : normT.includes(normArtist) || names(t).some(a => a.includes(normArtist));
+    !!normArtist &&
+    artistNames.some(a => a === normArtist || a.includes(normArtist) || normArtist.includes(a));
 
-  return hasArtist;
+  return hasArtist && !bad(t?.title) && !bad(artistNames.join(' '));
 };
 
 const resolveAudiusTrack = async (artist, title) => {
   const q = `${artist} ${title}`.trim();
   if (!q && !title) return null;
-  const cacheKey = norm(q || title);
+  const cacheKey = 'v2:' + norm(q || title);
   const cache = getStoredJSON('pm-audius-cache', {});
   if (cache[cacheKey] && cache[cacheKey].id) {
     return cache[cacheKey];
@@ -172,7 +171,7 @@ const resolveAudiusTrack = async (artist, title) => {
       if (r.ok) {
         const j = await r.json();
         const hits = (j.data || []).filter(x => (x.duration || 0) > 40);
-        const match = hits.find(x => smartMatch(x, title, artist)) || (hits.length > 0 ? hits[0] : null);
+        const match = hits.find(x => smartMatch(x, title, artist));
         if (match) {
           const item = {
             id: match.id,
