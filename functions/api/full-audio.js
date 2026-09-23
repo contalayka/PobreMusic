@@ -1,84 +1,88 @@
+const API = 'https://api.audius.co/v1';
+const APP = 'PobreMusic';
+
+const norm = value =>
+  (value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+
+const bad = value =>
+  /\b(cover|karaoke|acapella|a cappella|instrumental|remix|rework|bootleg|edit|sped up|slowed|nightcore|version|tribute|dublagem|parodia|parody|live|ao vivo)\b/i.test(
+    value || ''
+  );
+
+const matchTrack = (track, title, artist) => {
+  const wantedTitle = norm(title);
+  const wantedArtist = norm(artist);
+  const trackTitle = norm(track?.title);
+  const artistNames = [track?.user?.name, track?.artist, track?.artist_name].filter(Boolean).map(norm);
+
+  if (!wantedTitle || !trackTitle || bad(track?.title) || bad(track?.user?.name)) return false;
+
+  const titleWords = wantedTitle.split(' ').filter(Boolean);
+  const titleOk = titleWords.every(word => trackTitle.includes(word));
+  if (!titleOk) return false;
+
+  const artistOk = !wantedArtist || artistNames.some(name => name === wantedArtist || name.includes(wantedArtist) || wantedArtist.includes(name));
+  return artistOk;
+};
+
 export async function onRequest(context) {
   try {
     const url = new URL(context.request.url);
     const artist = url.searchParams.get('artist') || '';
     const title = url.searchParams.get('title') || '';
-    const q = url.searchParams.get('q') || `${artist} ${title}`;
+    const q = url.searchParams.get('q') || [artist, title].filter(Boolean).join(' ');
 
     if (!q.trim()) {
       return new Response(JSON.stringify({ error: 'Nenhum termo de busca fornecido' }), {
         status: 400,
-        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+        headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(q.trim() + ' audio')}`;
-    const ytRes = await fetch(searchUrl, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
-      }
-    });
+    const queries = [q, title, [title, artist].filter(Boolean).join(' ')].filter(Boolean);
+    for (const query of queries) {
+      const res = await fetch(
+        API + '/tracks/search?query=' + encodeURIComponent(query) + '&limit=15&sort_method=relevant&app_name=' + APP
+      );
+      if (!res.ok) continue;
 
-    if (!ytRes.ok) {
-      return new Response(JSON.stringify({ error: 'Erro ao buscar áudio' }), {
-        status: ytRes.status,
-        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-      });
-    }
+      const data = await res.json();
+      const tracks = (data.data || []).filter(track => (track.duration || 0) > 40);
+      const match = tracks.find(track => matchTrack(track, title, artist));
+      if (!match) continue;
 
-    const html = await ytRes.text();
-    let videoId = null;
-    let duration = 0;
-    let trackTitle = title || q;
-
-    const jsonMatch = html.match(/var ytInitialData = ({[\s\S]*?});<\/script>/);
-    if (jsonMatch) {
-      try {
-        const data = JSON.parse(jsonMatch[1]);
-        const contents =
-          data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents?.[0]
-            ?.itemSectionRenderer?.contents;
-        const video = contents?.find(c => c.videoRenderer)?.videoRenderer;
-        if (video) {
-          videoId = video.videoId;
-          trackTitle = video.title?.runs?.[0]?.text || trackTitle;
-          const durStr = video.lengthText?.simpleText;
-          if (durStr) {
-            const parts = durStr.split(':').map(Number);
-            if (parts.length === 2) duration = parts[0] * 60 + parts[1];
-            else if (parts.length === 3) duration = parts[0] * 3600 + parts[1] * 60 + parts[2];
+      return new Response(
+        JSON.stringify({
+          success: true,
+          id: match.id,
+          title: match.title,
+          duration: match.duration || 0,
+          artwork: match.artwork || null,
+          sourceUrl: API + '/tracks/' + match.id + '/stream?app_name=' + APP
+        }),
+        {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'public, max-age=86400'
           }
         }
-      } catch (e) {}
+      );
     }
 
-    if (!videoId) {
-      const match = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
-      if (match) videoId = match[1];
-    }
-
-    return new Response(
-      JSON.stringify({
-        success: !!videoId,
-        videoId,
-        duration,
-        title: trackTitle
-      }),
-      {
-        status: 200,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=86400'
-        }
-      }
-    );
+    return new Response(JSON.stringify({ success: false, sourceUrl: null }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300' }
+    });
   } catch (err) {
     return new Response(JSON.stringify({ error: err.message || 'Erro interno' }), {
       status: 500,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+      headers: { 'Content-Type': 'application/json' }
     });
   }
 }
