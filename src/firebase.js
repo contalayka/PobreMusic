@@ -1,6 +1,8 @@
 import { initializeApp } from 'firebase/app';
 import {
   getAuth,
+  setPersistence,
+  browserSessionPersistence,
   GoogleAuthProvider,
   signInWithPopup,
   signOut,
@@ -32,6 +34,10 @@ export const db = initializeFirestore(
   firebaseConfig.firestoreDatabaseId
 );
 export const auth = getAuth(app);
+// Login is session-only: reopening the browser requires signing in again.
+setPersistence(auth, browserSessionPersistence).catch(error => {
+  console.warn('Could not configure session-only authentication:', error);
+});
 
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
