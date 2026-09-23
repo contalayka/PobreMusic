@@ -28,10 +28,16 @@ import {
   FolderPlus,
   X,
   Cloud,
-  UserCheck
+  UserCheck,
+  ChevronDown
 } from 'lucide-react';
 import './styles.css';
+
+const SILENT_AUDIO_URI =
+  'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+
 import {
+  firebaseConfig,
   auth,
   db,
   googleProvider,
@@ -472,6 +478,112 @@ function Player({ queue, setQueue }) {
     };
   }, []);
 
+  // Background audio & Lock-screen controls (MediaSession API)
+  useEffect(() => {
+    if (!('mediaSession' in navigator) || !track) return;
+
+    try {
+      const artwork = art(track);
+      navigator.mediaSession.metadata = new window.MediaMetadata({
+        title: track.title || 'Música',
+        artist: track.artist || track.user?.name || 'PobreMusic',
+        album: 'PobreMusic',
+        artwork: artwork
+          ? [
+              { src: artwork, sizes: '96x96', type: 'image/jpeg' },
+              { src: artwork, sizes: '192x192', type: 'image/jpeg' },
+              { src: artwork, sizes: '512x512', type: 'image/jpeg' }
+            ]
+          : []
+      });
+
+      navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
+
+      navigator.mediaSession.setActionHandler('play', () => {
+        togglePlay();
+      });
+      navigator.mediaSession.setActionHandler('pause', () => {
+        togglePlay();
+      });
+      navigator.mediaSession.setActionHandler('previoustrack', () => {
+        previous();
+      });
+      navigator.mediaSession.setActionHandler('nexttrack', () => {
+        next();
+      });
+      navigator.mediaSession.setActionHandler('seekto', details => {
+        if (details.seekTime != null) {
+          seek(details.seekTime);
+        }
+      });
+      navigator.mediaSession.setActionHandler('seekforward', () => {
+        seek(Math.min((dur || 180), (time || 0) + 10));
+      });
+      navigator.mediaSession.setActionHandler('seekbackward', () => {
+        seek(Math.max(0, (time || 0) - 10));
+      });
+
+      if (dur > 0 && typeof navigator.mediaSession.setPositionState === 'function') {
+        navigator.mediaSession.setPositionState({
+          duration: Math.max(dur, 1),
+          playbackRate: 1,
+          position: Math.min(Math.max(time || 0, 0), dur)
+        });
+      }
+    } catch (e) {
+      console.warn('MediaSession sync error:', e);
+    }
+  }, [track, playing, dur, time]);
+
+  // Keep alive audio and screen wake lock for background playback
+  useEffect(() => {
+    const audioEl = ref.current;
+    if (!audioEl) return;
+
+    if (mode === 'yt') {
+      if (playing) {
+        if (!audioEl.src || !audioEl.src.startsWith('data:audio/wav')) {
+          audioEl.src = SILENT_AUDIO_URI;
+          audioEl.loop = true;
+          audioEl.volume = 0.001;
+        }
+        audioEl.play().catch(() => {});
+      } else {
+        audioEl.pause();
+      }
+    }
+  }, [mode, playing]);
+
+  useEffect(() => {
+    let wakeLock = null;
+    const reqWake = async () => {
+      try {
+        if ('wakeLock' in navigator && playing && !document.hidden) {
+          wakeLock = await navigator.wakeLock.request('screen');
+        }
+      } catch {}
+    };
+    reqWake();
+
+    const handleVis = () => {
+      if (!document.hidden && playing) {
+        if (mode === 'yt') {
+          const iframe = document.getElementById('yt-embed-player');
+          iframe?.contentWindow?.postMessage(
+            JSON.stringify({ event: 'command', func: 'playVideo', args: [] }),
+            '*'
+          );
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVis);
+
+    return () => {
+      wakeLock?.release().catch(() => {});
+      document.removeEventListener('visibilitychange', handleVis);
+    };
+  }, [playing, mode]);
+
   const fallbackToYouTube = async t => {
     let resolved = t;
     if (!t.youtubeId) {
@@ -485,8 +597,10 @@ function Player({ queue, setQueue }) {
       setMode('yt');
       setPlaying(true);
       if (ref.current) {
-        ref.current.pause();
-        ref.current.removeAttribute('src');
+        ref.current.src = SILENT_AUDIO_URI;
+        ref.current.loop = true;
+        ref.current.volume = 0.001;
+        ref.current.play().catch(() => {});
       }
     }
   };
@@ -548,8 +662,10 @@ function Player({ queue, setQueue }) {
       setMode('yt');
       setPlaying(true);
       if (ref.current) {
-        ref.current.pause();
-        ref.current.removeAttribute('src');
+        ref.current.src = SILENT_AUDIO_URI;
+        ref.current.loop = true;
+        ref.current.volume = 0.001;
+        ref.current.play().catch(() => {});
       }
       return;
     }
@@ -642,6 +758,18 @@ function Player({ queue, setQueue }) {
           '*'
         );
       }
+      if (ref.current) {
+        if (nextPlaying) {
+          if (!ref.current.src || !ref.current.src.startsWith('data:audio/wav')) {
+            ref.current.src = SILENT_AUDIO_URI;
+            ref.current.loop = true;
+            ref.current.volume = 0.001;
+          }
+          ref.current.play().catch(() => {});
+        } else {
+          ref.current.pause();
+        }
+      }
     } else if (mode === 'audio' && ref.current) {
       if (nextPlaying) {
         ref.current.play().catch(() => setPlaying(false));
@@ -689,38 +817,6 @@ function Player({ queue, setQueue }) {
       ref.current.volume = newVol;
     }
   };
-
-  useEffect(() => {
-    if (!('mediaSession' in navigator) || !track) return;
-    try {
-      const m = navigator.mediaSession;
-      m.metadata = new MediaMetadata({
-        title: track.title || track.name || 'Música',
-        artist: track.user?.name || track.artist || 'Artista',
-        album: 'PobreMusic',
-        artwork: [{ src: art(track), sizes: '480x480', type: 'image/jpeg' }]
-      });
-      const a = {
-        play: () => togglePlay(),
-        pause: () => togglePlay(),
-        nexttrack: next,
-        previoustrack: previous,
-        seekbackward: () => seek(Math.max(0, time - 10)),
-        seekforward: () => seek(Math.min(dur || 0, time + 10))
-      };
-      Object.entries(a).forEach(([k, h]) => {
-        try {
-          m.setActionHandler(k, h);
-        } catch {}
-      });
-      return () =>
-        Object.keys(a).forEach(k => {
-          try {
-            m.setActionHandler(k, null);
-          } catch {}
-        });
-    } catch {}
-  }, [track, idx, queue, shuffle, repeat, time, dur, mode, playing]);
 
   return {
     track,
@@ -782,10 +878,12 @@ function App() {
   const [showAddToPlaylistModal, setShowAddToPlaylistModal] = useState(null);
   const [newPlaylistModal, setNewPlaylistModal] = useState(false);
   const [newPlaylistName, setNewPlaylistName] = useState('');
+  const [mobilePlayerOpen, setMobilePlayerOpen] = useState(false);
   const [trending, setTrending] = useState([]);
   const [authUser, setAuthUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [cloudSynced, setCloudSynced] = useState(false);
+  const [authErrorModal, setAuthErrorModal] = useState(null);
 
   // Clean data helpers to prevent Firestore undefined errors
   const cleanTrackForFirestore = t => ({
@@ -1007,11 +1105,33 @@ function App() {
 
   const loginWithGoogle = async () => {
     try {
+      setAuthErrorModal(null);
       await signInWithPopup(auth, googleProvider);
     } catch (err) {
       console.error('Google Sign-in error:', err);
-      if (err?.code !== 'auth/popup-closed-by-user' && err?.code !== 'auth/cancelled-popup-request') {
-        alert('Erro ao conectar com Google. Tente novamente.');
+      if (err?.code === 'auth/popup-closed-by-user' || err?.code === 'auth/cancelled-popup-request') {
+        return;
+      }
+
+      const domain = typeof window !== 'undefined' ? window.location.hostname : '';
+      if (err?.code === 'auth/unauthorized-domain') {
+        setAuthErrorModal({
+          title: 'Domínio não autorizado no Firebase',
+          code: err.code,
+          message: `O Firebase bloqueou o login porque o domínio "${domain}" ainda não foi adicionado aos Domínios Autorizados do projeto.`,
+          domain,
+          projectId: firebaseConfig.projectId,
+          type: 'unauthorized-domain'
+        });
+      } else {
+        setAuthErrorModal({
+          title: 'Não foi possível entrar com o Google',
+          code: err?.code || 'erro_desconhecido',
+          message: err?.message || 'Ocorreu um erro durante a autenticação.',
+          domain,
+          projectId: firebaseConfig.projectId,
+          type: 'generic'
+        });
       }
     }
   };
@@ -1372,6 +1492,14 @@ function App() {
 
         <main>
           <header>
+            <div
+              className="mobile-brand"
+              onClick={() => setPage('home')}
+              style={{ cursor: 'pointer', marginRight: 10 }}
+            >
+              <span>♬</span> PobreMusic
+            </div>
+
             <form
               onSubmit={e => {
                 e.preventDefault();
@@ -2285,10 +2413,29 @@ function App() {
         </div>
 
         <footer>
+          {p.track && (
+            <div className="mini-progress-bar">
+              <div
+                className="mini-progress-fill"
+                style={{
+                  width: `${Math.min(100, Math.max(0, ((p.time || 0) / (p.dur || 1)) * 100))}%`
+                }}
+              />
+            </div>
+          )}
           {p.track ? (
             <>
-              <img src={art(p.track)} alt="" />
-              <div className="now">
+              <img
+                src={art(p.track)}
+                alt=""
+                onClick={() => setMobilePlayerOpen(true)}
+                style={{ cursor: 'pointer' }}
+              />
+              <div
+                className="now"
+                onClick={() => setMobilePlayerOpen(true)}
+                style={{ cursor: 'pointer' }}
+              >
                 <b>{p.track.title}</b>
                 <span>{p.track.user?.name || p.track.artist || 'Artista'}</span>
                 {p.loadingTrack && (
@@ -2297,6 +2444,17 @@ function App() {
                   </span>
                 )}
               </div>
+              <button
+                className={liked.some(a => a.id === p.track.id) ? 'liked' : ''}
+                onClick={e => {
+                  e.stopPropagation();
+                  like(p.track);
+                }}
+                title="Curtir"
+                style={{ padding: 6 }}
+              >
+                <Heart size={18} fill={liked.some(a => a.id === p.track.id) ? '#c084fc' : 'none'} />
+              </button>
               <button
                 onClick={() => p.setShuffle(!p.shuffle)}
                 className={p.shuffle ? 'active' : ''}
@@ -2354,6 +2512,189 @@ function App() {
             <span className="emptyPlayer">Escolha uma música para começar a ouvir</span>
           )}
         </footer>
+
+        {/* Mobile Bottom Navigation Bar */}
+        <nav className="mobile-nav">
+          <button
+            className={`mobile-nav-item ${page === 'home' ? 'active' : ''}`}
+            onClick={() => setPage('home')}
+          >
+            <Home size={22} />
+            <span>Início</span>
+          </button>
+          <button
+            className={`mobile-nav-item ${page === 'search' ? 'active' : ''}`}
+            onClick={() => setPage('search')}
+          >
+            <Search size={22} />
+            <span>Buscar</span>
+          </button>
+          <button
+            className={`mobile-nav-item ${['library', 'liked', 'playlist-detail'].includes(page) ? 'active' : ''}`}
+            onClick={() => setPage('library')}
+          >
+            <Library size={22} />
+            <span>Biblioteca</span>
+          </button>
+          <button
+            className={`mobile-nav-item ${page === 'import' ? 'active' : ''}`}
+            onClick={() => setPage('import')}
+          >
+            <Download size={22} />
+            <span>Importar</span>
+          </button>
+        </nav>
+
+        {/* Full-Screen Mobile Player Overlay */}
+        {mobilePlayerOpen && p.track && (
+          <div className="full-player-overlay">
+            <div className="full-player-header">
+              <button
+                onClick={() => setMobilePlayerOpen(false)}
+                style={{
+                  background: 'rgba(255,255,255,0.08)',
+                  border: 0,
+                  color: '#fff',
+                  borderRadius: '50%',
+                  width: 40,
+                  height: 40,
+                  display: 'grid',
+                  placeItems: 'center',
+                  cursor: 'pointer'
+                }}
+              >
+                <ChevronDown size={24} />
+              </button>
+              <div style={{ textAlign: 'center' }}>
+                <span style={{ fontSize: 11, letterSpacing: 1.5, color: '#a1a1aa', fontWeight: 800, textTransform: 'uppercase' }}>
+                  Tocando Agora
+                </span>
+                <b style={{ display: 'block', fontSize: 13, color: '#fff', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {p.mode === 'spotify' ? 'Spotify Web' : p.mode === 'yt' ? 'Áudio em 2º Plano' : 'Áudio Completo'}
+                </b>
+              </div>
+              <button
+                onClick={() => setShowAddToPlaylistModal(p.track)}
+                style={{
+                  background: 'rgba(255,255,255,0.08)',
+                  border: 0,
+                  color: '#fff',
+                  borderRadius: '50%',
+                  width: 40,
+                  height: 40,
+                  display: 'grid',
+                  placeItems: 'center',
+                  cursor: 'pointer'
+                }}
+              >
+                <Plus size={22} />
+              </button>
+            </div>
+
+            <img className="full-player-art" src={art(p.track)} alt="" />
+
+            <div className="full-player-info">
+              <div style={{ overflow: 'hidden', paddingRight: 12, flex: 1 }}>
+                <h3 style={{ margin: 0, fontSize: 20, fontWeight: 800, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {p.track.title}
+                </h3>
+                <span style={{ color: '#c084fc', fontSize: 15, fontWeight: 600, display: 'block', marginTop: 4 }}>
+                  {p.track.user?.name || p.track.artist || 'Artista'}
+                </span>
+              </div>
+              <button
+                className={liked.some(a => a.id === p.track.id) ? 'liked' : ''}
+                onClick={() => like(p.track)}
+                style={{
+                  background: 'none',
+                  border: 0,
+                  color: liked.some(a => a.id === p.track.id) ? '#c084fc' : '#aaa',
+                  cursor: 'pointer',
+                  padding: 8
+                }}
+              >
+                <Heart size={26} fill={liked.some(a => a.id === p.track.id) ? '#c084fc' : 'none'} />
+              </button>
+            </div>
+
+            <div className="full-player-scrubber">
+              <input
+                type="range"
+                min="0"
+                max={Math.max(1, Math.round(p.dur || 1))}
+                step="0.5"
+                value={Math.min(Math.round(p.dur || 1), Math.max(0, p.time))}
+                onChange={e => p.seek(+e.target.value)}
+              />
+              <div className="full-player-times">
+                <span>{fmt(p.time)}</span>
+                <span>{fmt(p.dur)}</span>
+              </div>
+            </div>
+
+            <div className="full-player-controls">
+              <button
+                onClick={() => p.setShuffle(!p.shuffle)}
+                style={{
+                  background: 'none',
+                  border: 0,
+                  color: p.shuffle ? '#c084fc' : '#71717a',
+                  cursor: 'pointer',
+                  padding: 8
+                }}
+              >
+                <Shuffle size={20} />
+              </button>
+              <button
+                onClick={p.previous}
+                style={{
+                  background: 'none',
+                  border: 0,
+                  color: '#fff',
+                  cursor: 'pointer',
+                  padding: 8
+                }}
+              >
+                <SkipBack size={28} />
+              </button>
+              <button
+                className="full-player-play-btn"
+                onClick={p.togglePlay}
+              >
+                {p.playing ? <Pause size={28} /> : <Play size={28} style={{ marginLeft: 3 }} />}
+              </button>
+              <button
+                onClick={p.next}
+                style={{
+                  background: 'none',
+                  border: 0,
+                  color: '#fff',
+                  cursor: 'pointer',
+                  padding: 8
+                }}
+              >
+                <SkipForward size={28} />
+              </button>
+              <button
+                onClick={() => p.setRepeat(!p.repeat)}
+                style={{
+                  background: 'none',
+                  border: 0,
+                  color: p.repeat ? '#c084fc' : '#71717a',
+                  cursor: 'pointer',
+                  padding: 8
+                }}
+              >
+                <Repeat size={20} />
+              </button>
+            </div>
+
+            <div className="background-badge">
+              <div className="pulse-dot" />
+              <span>Toca em 2º plano com tela bloqueada</span>
+            </div>
+          </div>
+        )}
 
         {/* Modal: Create New Playlist */}
         {newPlaylistModal && (
@@ -2554,6 +2895,129 @@ function App() {
                   }}
                 >
                   Fechar
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* Modal: Erro de Autenticação / Domínio não autorizado */}
+        {authErrorModal && (
+          <div className="modal-overlay" onClick={() => setAuthErrorModal(null)}>
+            <div className="modal-card" style={{ maxWidth: 540 }} onClick={e => e.stopPropagation()}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <AlertCircle size={22} color="#f87171" />
+                  <h3 style={{ margin: 0, fontSize: 18, color: '#fca5a5' }}>
+                    {authErrorModal.title}
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setAuthErrorModal(null)}
+                  style={{ background: 'transparent', border: 0, color: '#888', cursor: 'pointer', padding: 4 }}
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <p style={{ fontSize: 14, color: '#e5e7eb', lineHeight: 1.5, marginBottom: 16 }}>
+                {authErrorModal.message}
+              </p>
+
+              {authErrorModal.type === 'unauthorized-domain' ? (
+                <div
+                  style={{
+                    background: '#131218',
+                    border: '1px solid #2d2639',
+                    borderRadius: 10,
+                    padding: '14px 16px',
+                    fontSize: 13,
+                    color: '#d1d5db',
+                    lineHeight: 1.6,
+                    marginBottom: 16
+                  }}
+                >
+                  <b style={{ color: '#fff', display: 'block', marginBottom: 6 }}>
+                    Passo a passo para autorizar no Firebase:
+                  </b>
+                  <ol style={{ paddingLeft: 18, margin: 0 }}>
+                    <li style={{ marginBottom: 6 }}>
+                      Abra as configurações de autenticação no Console do Firebase:{' '}
+                      <a
+                        href={`https://console.firebase.google.com/project/${authErrorModal.projectId}/authentication/settings`}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ color: '#c084fc', textDecoration: 'underline', fontWeight: 600 }}
+                      >
+                        Abrir Firebase Settings ↗
+                      </a>
+                    </li>
+                    <li style={{ marginBottom: 6 }}>
+                      Role a tela até a seção <b>"Domínios autorizados"</b> (Authorized domains).
+                    </li>
+                    <li style={{ marginBottom: 6 }}>
+                      Clique no botão <b>"Adicionar domínio"</b>.
+                    </li>
+                    <li style={{ marginBottom: 6 }}>
+                      Cole: <code style={{ background: '#252033', padding: '2px 8px', borderRadius: 4, color: '#38bdf8', fontWeight: 700 }}>{authErrorModal.domain}</code>
+                    </li>
+                    <li>
+                      Clique em <b>Salvar</b>. O login com o Google passará a funcionar imediatamente!
+                    </li>
+                  </ol>
+                </div>
+              ) : (
+                <div
+                  style={{
+                    background: '#181313',
+                    border: '1px solid #362222',
+                    borderRadius: 10,
+                    padding: '12px 14px',
+                    fontSize: 13,
+                    color: '#f87171',
+                    marginBottom: 16
+                  }}
+                >
+                  Código do erro: <code>{authErrorModal.code}</code>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+                {authErrorModal.type === 'unauthorized-domain' && (
+                  <a
+                    href={`https://console.firebase.google.com/project/${authErrorModal.projectId}/authentication/settings`}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      background: '#a855f7',
+                      color: '#fff',
+                      border: 0,
+                      borderRadius: 20,
+                      padding: '8px 18px',
+                      fontSize: 13,
+                      fontWeight: 700,
+                      textDecoration: 'none',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6
+                    }}
+                  >
+                    Abrir Firebase Console ↗
+                  </a>
+                )}
+                <button
+                  onClick={() => setAuthErrorModal(null)}
+                  style={{
+                    background: '#222',
+                    border: '1px solid #333',
+                    color: '#fff',
+                    borderRadius: 20,
+                    padding: '8px 18px',
+                    fontSize: 13,
+                    cursor: 'pointer',
+                    fontWeight: 600
+                  }}
+                >
+                  Entendi
                 </button>
               </div>
             </div>

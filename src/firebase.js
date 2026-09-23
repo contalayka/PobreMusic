@@ -57,6 +57,7 @@ export function handleFirestoreError(error, operationType, path) {
 }
 
 export {
+  firebaseConfig,
   signInWithPopup,
   signOut,
   onAuthStateChanged,

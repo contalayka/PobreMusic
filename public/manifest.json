@@ -1,0 +1,17 @@
+{
+  "name": "PobreMusic",
+  "short_name": "PobreMusic",
+  "description": "Ouça músicas e playlists no navegador ou em segundo plano no celular.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0b0b0d",
+  "theme_color": "#0b0b0d",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    }
+  ]
+}
