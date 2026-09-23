@@ -3891,10 +3891,6 @@ function ImportPanel({ onImport, onPlay, authUser, onGoogleLogin }) {
       }
     } catch {}
 
-    // No protected-platform extraction fallback: the Audius resolver above is the supported source.
-
-    } catch {}
-
     setStatus('Nenhuma gravação compatível encontrada.');
   };
 
