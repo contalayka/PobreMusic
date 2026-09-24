@@ -10,15 +10,23 @@ const norm = value =>
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
 
-const bad = value =>
-  /\b(cover|karaoke|acapella|a cappella|instrumental|remix|rework|bootleg|edit|sped up|slowed|nightcore|version|tribute|dublagem|parodia|parody|live|ao vivo)\b/i.test(value || '');
+const isUnwantedVariant = (candidate, wanted = '') => {
+  const normC = norm(candidate);
+  const normW = norm(wanted);
+  const badPatterns = [
+    /\b(cover|karaoke|acapella|a cappella|instrumental|tribute|dublagem|parodia|parody)\b/i,
+    /\b(sped up|slowed|nightcore)\b/i,
+    /\b(ao vivo|live at|live in|live from)\b/i
+  ];
+  return badPatterns.some(pat => pat.test(normC) && !pat.test(normW));
+};
 
 const matchTrack = (track, title, artist) => {
   const wantedTitle = norm(title);
   const wantedArtist = norm(artist);
   const trackTitle = norm(track?.title);
   const artistNames = [track?.user?.name, track?.artist, track?.artist_name].filter(Boolean).map(norm);
-  if (!wantedTitle || !trackTitle || bad(track?.title) || bad(track?.user?.name)) return false;
+  if (!wantedTitle || !trackTitle || isUnwantedVariant(track?.title, title) || isUnwantedVariant(track?.user?.name, artist)) return false;
   if (!wantedTitle.split(' ').filter(Boolean).every(word => trackTitle.includes(word))) return false;
   return !wantedArtist || artistNames.some(name => name === wantedArtist || name.includes(wantedArtist) || wantedArtist.includes(name));
 };
@@ -28,7 +36,7 @@ const matchJamendoTrack = (track, title, artist) => {
   const wantedArtist = norm(artist);
   const trackTitle = norm(track?.name);
   const trackArtist = norm(track?.artist_name);
-  if (!wantedTitle || !trackTitle || bad(track?.name) || bad(track?.artist_name)) return false;
+  if (!wantedTitle || !trackTitle || isUnwantedVariant(track?.name, title) || isUnwantedVariant(track?.artist_name, artist)) return false;
   if (!wantedTitle.split(' ').filter(Boolean).every(word => trackTitle.includes(word))) return false;
   return !wantedArtist || trackArtist === wantedArtist || trackArtist.includes(wantedArtist) || wantedArtist.includes(trackArtist);
 };

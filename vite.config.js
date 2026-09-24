@@ -95,8 +95,16 @@ const musicApiPlugin = () => ({
 
         const norm = value =>
           (value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
-        const bad = value =>
-          /\b(cover|karaoke|acapella|a cappella|instrumental|remix|rework|bootleg|edit|sped up|slowed|nightcore|version|tribute|dublagem|parodia|parody|live|ao vivo)\b/i.test(value || '');
+        const isUnwantedVariant = (candidate, wanted = '') => {
+          const normC = norm(candidate);
+          const normW = norm(wanted);
+          const badPatterns = [
+            /\b(cover|karaoke|acapella|a cappella|instrumental|tribute|dublagem|parodia|parody)\b/i,
+            /\b(sped up|slowed|nightcore)\b/i,
+            /\b(ao vivo|live at|live in|live from)\b/i
+          ];
+          return badPatterns.some(pat => pat.test(normC) && !pat.test(normW));
+        };
         const wantedTitle = norm(title);
         const wantedArtist = norm(artist);
         const queries = [q, title, [title, artist].filter(Boolean).join(' ')].filter(Boolean);
@@ -110,7 +118,7 @@ const musicApiPlugin = () => ({
           );
           if (!r.ok) continue;
           const data = await r.json();
-          const tracks = (data.data || []).filter(t => (t.duration || 0) > 40 && !bad(t.title) && !bad(t.user?.name));
+          const tracks = (data.data || []).filter(t => (t.duration || 0) > 40 && !isUnwantedVariant(t.title, title) && !isUnwantedVariant(t.user?.name, artist));
           match = tracks.find(t => {
             const tt = norm(t.title);
             const names = [t.user?.name, t.artist, t.artist_name].filter(Boolean).map(norm);
