@@ -48,22 +48,26 @@ const json = (body, status = 200, cache = 'public, max-age=300') =>
   });
 
 async function findAudius(artist, title, queries) {
+  let fallback = null;
   for (const query of queries) {
     try {
       const res = await fetch(API + '/tracks/search?query=' + encodeURIComponent(query) + '&limit=15&sort_method=relevant&app_name=' + APP);
       if (!res.ok) continue;
       const data = await res.json();
-      const tracks = (data.data || []).filter(track => (track.duration || 0) > 40);
+      const allTracks = (data.data || []).filter(track => (track.duration || 0) > 30);
+      const filtered = allTracks.filter(track => !isUnwantedVariant(track?.title, title) && !isUnwantedVariant(track?.user?.name, artist));
+      const tracks = filtered.length > 0 ? filtered : allTracks;
       const match = tracks.find(track => matchTrack(track, title, artist));
-      if (!match) continue;
-      return {
-        provider: 'audius',
-        id: match.id,
-        title: match.title,
-        duration: match.duration || 0,
-        artwork: match.artwork || null,
-        sourceUrl: API + '/tracks/' + match.id + '/stream?app_name=' + APP
-      };
+      if (match) {
+        return {
+          provider: 'audius',
+          id: match.id,
+          title: match.title,
+          duration: match.duration || 0,
+          artwork: match.artwork || null,
+          sourceUrl: API + '/tracks/' + match.id + '/stream?app_name=' + APP
+        };
+      }
     } catch {}
   }
   return null;

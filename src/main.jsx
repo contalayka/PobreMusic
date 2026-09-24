@@ -52,6 +52,26 @@ import {
 const SILENT_AUDIO_URI =
   'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
 
+const getSilentStream = () => {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (AudioCtx) {
+      if (!window.__silentAudioCtx) {
+        window.__silentAudioCtx = new AudioCtx();
+      }
+      if (window.__silentAudioCtx.state === 'suspended') {
+        window.__silentAudioCtx.resume().catch(() => {});
+      }
+      if (!window.__silentMediaStream) {
+        const dest = window.__silentAudioCtx.createMediaStreamDestination();
+        window.__silentMediaStream = dest.stream;
+      }
+      return window.__silentMediaStream;
+    }
+  } catch {}
+  return null;
+};
+
 const API = 'https://api.audius.co/v1';
 const APP = 'PobreMusic';
 const SA = 'https://accounts.spotify.com';
@@ -78,10 +98,23 @@ const norm = v =>
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
 
-const bad = v =>
-  /\b(cover|karaoke|acapella|a cappella|instrumental|remix|rework|bootleg|edit|sped up|slowed|nightcore|version|tribute|dublagem|parodia|parody|live|ao vivo)\b/i.test(
+const isUnwantedVariant = (candidate, wanted = '') => {
+  const normC = norm(candidate);
+  const normW = norm(wanted);
+  const badPatterns = [
+    /\b(karaoke|acapella|a cappella|instrumental|tribute|dublagem|parodia|parody)\b/i,
+    /\b(sped up|slowed|nightcore)\b/i,
+    /\b(ao vivo|live at|live in|live from)\b/i
+  ];
+  return badPatterns.some(pat => pat.test(normC) && !pat.test(normW));
+};
+
+const bad = (v, wanted = '') => {
+  if (wanted) return isUnwantedVariant(v, wanted);
+  return /\b(karaoke|acapella|a cappella|instrumental|tribute|dublagem|parodia|parody|sped up|slowed|nightcore|ao vivo|live at|live in)\b/i.test(
     v || ''
   );
+};
 
 const names = t => [t?.user?.name, t?.artist, t?.artist_name].filter(Boolean).map(norm);
 
@@ -89,13 +122,15 @@ const exact = (t, title, artist) => {
   const normT = norm(t?.title);
   const normWanted = norm(title);
   const artistMatch = names(t).some(a => a.includes(norm(artist)) || norm(artist).includes(a));
-  return normT.includes(normWanted) && artistMatch && !bad(t?.title);
+  return normT.includes(normWanted) && artistMatch && !isUnwantedVariant(t?.title, title);
 };
 
 const smartMatch = (t, title, artist) => {
   const normT = norm(t?.title);
   const normTitle = norm(title);
   const normArtist = norm(artist);
+
+  if (!normTitle || !normT) return false;
 
   const titleWords = normTitle.split(' ').filter(w => w.length > 2);
   const hasTitle =
@@ -104,10 +139,31 @@ const smartMatch = (t, title, artist) => {
 
   const artistNames = names(t);
   const hasArtist =
-    !!normArtist &&
+    !normArtist ||
     artistNames.some(a => a === normArtist || a.includes(normArtist) || normArtist.includes(a));
 
-  return hasArtist && !bad(t?.title) && !bad(artistNames.join(' '));
+  return hasArtist && !isUnwantedVariant(t?.title, title);
+};
+
+const getAudiusStreamUrl = t => {
+  if (!t) return null;
+  if (t.sourceUrl && !isSpotifyPreview(t.sourceUrl)) return t.sourceUrl;
+  const idStr = String(t.id || '');
+  const isSpotifyId = /^[A-Za-z0-9]{22}$/.test(idStr) || idStr.startsWith('sp_') || !!t.spotifyUri;
+  const isSpecialId = idStr.startsWith('yt_') || idStr.startsWith('tr_') || idStr.startsWith('txt_') || !!t.youtubeId;
+
+  if (
+    t.provider === 'audius' ||
+    t.user?.handle ||
+    t.user?.name ||
+    t.track_cid ||
+    t.genre ||
+    t.is_streamable !== undefined ||
+    (!isSpotifyId && !isSpecialId && idStr.length > 0)
+  ) {
+    return `${API}/tracks/${t.id}/stream?app_name=${APP}`;
+  }
+  return null;
 };
 
 const resolveFullAudio = async (t, options = {}) => {
@@ -158,13 +214,14 @@ const resolveFullAudio = async (t, options = {}) => {
 const resolveAudiusTrack = async (artist, title) => {
   const q = `${artist} ${title}`.trim();
   if (!q && !title) return null;
-  const cacheKey = 'v2:' + norm(q || title);
+  const cacheKey = 'v5:' + norm(q || title);
   const cache = getStoredJSON('pm-audius-cache', {});
-  if (cache[cacheKey] && cache[cacheKey].id) {
+  if (cache[cacheKey] && cache[cacheKey].id && cache[cacheKey].sourceUrl) {
     return cache[cacheKey];
   }
 
-  const queries = [q, title, `${title} ${artist}`].filter(Boolean);
+  const queries = [q, `${title} ${artist}`, title].filter(Boolean);
+
   for (const query of queries) {
     try {
       const r = await fetch(
@@ -172,25 +229,40 @@ const resolveAudiusTrack = async (artist, title) => {
       );
       if (r.ok) {
         const j = await r.json();
-        const hits = (j.data || []).filter(x => (x.duration || 0) > 40);
-        const match = hits.find(x => smartMatch(x, title, artist));
-        if (match) {
+        const hits = (j.data || []).filter(x => (x.duration || 0) > 30);
+        if (!hits.length) continue;
+
+        const exactMatch = hits.find(x => exact(x, title, artist));
+        if (exactMatch) {
           const item = {
-            id: match.id,
-            sourceUrl: API + '/tracks/' + match.id + '/stream?app_name=' + APP,
-            duration: match.duration || 180,
-            title: match.title,
-            artwork: match.artwork
+            id: exactMatch.id,
+            sourceUrl: `${API}/tracks/${exactMatch.id}/stream?app_name=${APP}`,
+            duration: exactMatch.duration || 180,
+            title: exactMatch.title,
+            artwork: exactMatch.artwork
           };
           cache[cacheKey] = item;
-          try {
-            localStorage.setItem('pm-audius-cache', JSON.stringify(cache));
-          } catch {}
+          try { localStorage.setItem('pm-audius-cache', JSON.stringify(cache)); } catch {}
+          return item;
+        }
+
+        const smMatch = hits.find(x => smartMatch(x, title, artist));
+        if (smMatch) {
+          const item = {
+            id: smMatch.id,
+            sourceUrl: `${API}/tracks/${smMatch.id}/stream?app_name=${APP}`,
+            duration: smMatch.duration || 180,
+            title: smMatch.title,
+            artwork: smMatch.artwork
+          };
+          cache[cacheKey] = item;
+          try { localStorage.setItem('pm-audius-cache', JSON.stringify(cache)); } catch {}
           return item;
         }
       }
     } catch (e) {}
   }
+
   return null;
 };
 
@@ -356,6 +428,9 @@ function Player({ queue, setQueue }) {
   const audioContextRef = useRef(null);
   const queueRef = useRef(queue);
   const trackRef = useRef(null);
+  const idxRef = useRef(idx);
+  const shuffleRef = useRef(shuffle);
+  const nextFnRef = useRef(null);
 
   useEffect(() => {
     queueRef.current = queue;
@@ -365,19 +440,34 @@ function Player({ queue, setQueue }) {
     trackRef.current = track;
   }, [track]);
 
-  // Initialize Web Audio continuous keep-alive on user interaction
+  useEffect(() => {
+    idxRef.current = idx;
+  }, [idx]);
+
+  useEffect(() => {
+    shuffleRef.current = shuffle;
+  }, [shuffle]);
+
+  useEffect(() => {
+    repeatRef.current = repeat;
+  }, [repeat]);
+
+  // Clear legacy bad audio caches
+  try {
+    const legacyCache = localStorage.getItem('pm-audius-cache');
+    if (legacyCache && !legacyCache.includes('v5:')) {
+      localStorage.removeItem('pm-audius-cache');
+      localStorage.removeItem('pm-full-audio-cache');
+    }
+  } catch {}
+
+  // Initialize Web Audio keep-alive cleanly without annoying oscillators
   const initWebAudioKeepAlive = () => {
     try {
       if (!audioContextRef.current) {
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
         if (AudioCtx) {
           const ctx = new AudioCtx();
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          gain.gain.value = 0.00001; // virtually silent keepalive to prevent mobile OS DAC sleep
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-          osc.start();
           audioContextRef.current = ctx;
         }
       }
@@ -446,6 +536,7 @@ function Player({ queue, setQueue }) {
             }
           } else if (d.info === 0) {
             if (repeatRef.current) seek(0);
+            else if (nextFnRef.current) nextFnRef.current();
             else next();
           }
         }
@@ -465,12 +556,6 @@ function Player({ queue, setQueue }) {
         const iframe = document.getElementById('yt-embed-player');
         if (iframe?.contentWindow) {
           try {
-            if (userWantsPlayRef.current) {
-              iframe.contentWindow.postMessage(
-                JSON.stringify({ event: 'command', func: 'playVideo', args: [] }),
-                '*'
-              );
-            }
             iframe.contentWindow.postMessage(
               JSON.stringify({ event: 'command', func: 'getCurrentTime', args: [] }),
               '*'
@@ -485,7 +570,8 @@ function Player({ queue, setQueue }) {
               seek(0);
               return 0;
             } else {
-              next();
+              if (nextFnRef.current) nextFnRef.current();
+              else next();
               return 0;
             }
           }
@@ -526,7 +612,7 @@ function Player({ queue, setQueue }) {
         e.currentTime = 0;
         e.play().catch(() => {});
       } else {
-        next();
+        nextFnRef.current ? nextFnRef.current() : next();
       }
     };
     const onPlay = () => {
@@ -552,6 +638,29 @@ function Player({ queue, setQueue }) {
       e.removeEventListener('pause', onPause);
     };
   }, [src]);
+
+  // Synchronize HTML5 audio element with state
+  useEffect(() => {
+    if (mode === 'audio' && src && ref.current) {
+      if (playing) {
+        if (ref.current.src !== src && !ref.current.src.endsWith(src)) {
+          ref.current.src = src;
+        }
+        ref.current.volume = vol;
+        if (ref.current.paused) {
+          ref.current.play().catch(e => {
+            if (e.name !== 'AbortError') {
+              console.warn('Audio sync play error:', e);
+            }
+          });
+        }
+      } else {
+        if (!ref.current.paused) {
+          ref.current.pause();
+        }
+      }
+    }
+  }, [src, playing, mode, vol]);
 
   // Spotify Web Playback SDK
   useEffect(() => {
@@ -715,14 +824,24 @@ function Player({ queue, setQueue }) {
 
     if (mode === 'yt') {
       if (playing) {
-        if (!audioEl.src || !audioEl.src.startsWith('data:audio/wav')) {
+        const stream = getSilentStream();
+        if (stream) {
+          if (audioEl.srcObject !== stream) {
+            audioEl.srcObject = stream;
+            audioEl.play().catch(() => {});
+          }
+        } else if (!audioEl.src || !audioEl.src.startsWith('data:audio/wav')) {
           audioEl.src = SILENT_AUDIO_URI;
           audioEl.loop = true;
-          audioEl.volume = 0.001;
+          audioEl.volume = 0;
+          audioEl.play().catch(() => {});
         }
-        audioEl.play().catch(() => {});
       } else {
         audioEl.pause();
+      }
+    } else {
+      if (audioEl.srcObject) {
+        audioEl.srcObject = null;
       }
     }
   }, [mode, playing]);
@@ -762,8 +881,12 @@ function Player({ queue, setQueue }) {
     if (!e) return;
     try {
       e.volume = 0;
-      e.src = SILENT_AUDIO_URI;
-      e.loop = true;
+      const s = getSilentStream();
+      if (s) {
+        e.srcObject = s;
+      } else {
+        e.src = SILENT_AUDIO_URI;
+      }
       const p = e.play();
       if (p?.catch) p.catch(() => {});
     } catch {}
@@ -772,13 +895,21 @@ function Player({ queue, setQueue }) {
   const playAudioSource = async (audioUrl, sourceTrack, { allowFallback = true } = {}) => {
     if (!audioUrl || !ref.current) return false;
     const e = ref.current;
-    e.src = audioUrl;
+    if (e.srcObject) {
+      e.srcObject = null;
+    }
+    if (e.src !== audioUrl && !e.src.endsWith(audioUrl)) {
+      e.src = audioUrl;
+    }
     e.loop = false;
     e.volume = vol;
     try {
       await e.play();
       return true;
     } catch (err) {
+      if (err.name === 'AbortError') {
+        return false;
+      }
       console.warn('Audio source failed:', err);
       if (allowFallback) await fallbackToSource(sourceTrack, audioUrl);
       else setPlaying(false);
@@ -807,6 +938,44 @@ function Player({ queue, setQueue }) {
       setPlaying(true);
       await playAudioSource(updated.sourceUrl, updated, { allowFallback: false });
     } else {
+      // Fallback to YouTube stream/embed
+      try {
+        const queryTerm = `${artist} ${title}`.trim();
+        if (queryTerm) {
+          const ytRes = await fetch(`/api/youtube-search?q=${encodeURIComponent(queryTerm)}`);
+          if (ytRes.ok) {
+            const ytData = await ytRes.json();
+            const firstYt = ytData.results?.[0];
+            if (firstYt?.youtubeId) {
+              const updated = {
+                ...cleanTrack,
+                youtubeId: firstYt.youtubeId,
+                duration: firstYt.duration || t.duration || 180,
+                artwork: t.artwork || firstYt.artwork
+              };
+              setTrack(updated);
+              setDur(updated.duration);
+              setTime(0);
+              setMode('yt');
+              setPlaying(true);
+              setSrc(null);
+              userWantsPlayRef.current = true;
+              window.__keepBackgroundAudioPlaying = true;
+              if (ref.current) {
+                ref.current.src = SILENT_AUDIO_URI;
+                ref.current.loop = true;
+                ref.current.volume = 0.001;
+                ref.current.play().catch(() => {});
+              }
+              setLoadingTrack(false);
+              return;
+            }
+          }
+        }
+      } catch (ytErr) {
+        console.warn('YouTube fallback search failed:', ytErr);
+      }
+
       setPlaying(false);
       userWantsPlayRef.current = false;
       console.warn('No playable source found for:', artist, title);
@@ -817,7 +986,6 @@ function Player({ queue, setQueue }) {
   const startPlayback = async (t, i) => {
     if (!t) return;
     initWebAudioKeepAlive();
-    unlockAudio();
     userWantsPlayRef.current = true;
     window.__keepBackgroundAudioPlaying = true;
     setIdx(i);
@@ -854,16 +1022,20 @@ function Player({ queue, setQueue }) {
     }
 
     // 1. Direct audio check (Audius tracks or direct audio streams)
-    const hasDirectAudio = t.sourceUrl && !isSpotifyPreview(t.sourceUrl);
-    // Never infer a provider from a generic ID. Spotify IDs are also 22-character
-    // strings, so treating every ID as an Audius ID can play the wrong track or fail.
-    if (hasDirectAudio) {
-      const audioUrl = t.sourceUrl;
+    const directAudioUrl = getAudiusStreamUrl(t);
+    if (directAudioUrl) {
+      const audioUrl = directAudioUrl;
+      const updatedTrack = {
+        ...t,
+        sourceUrl: audioUrl,
+        provider: t.provider || 'audius'
+      };
+      setTrack(updatedTrack);
       setMode('audio');
       setSrc(audioUrl);
       setPlaying(true);
       if (ref.current) {
-        playAudioSource(audioUrl, t);
+        playAudioSource(audioUrl, updatedTrack);
       }
       return;
     }
@@ -883,6 +1055,12 @@ function Player({ queue, setQueue }) {
 
     // 3. Resolve on Audius first using smartMatch (100% full duration)
     setLoadingTrack(true);
+    if (ref.current) {
+      ref.current.volume = 0.001;
+      ref.current.src = SILENT_AUDIO_URI;
+      ref.current.play().catch(() => {});
+    }
+
     const artist = t.user?.name || t.artist || t.artists?.[0]?.name || '';
     const title = t.name || t.title || '';
     const audiusMatch = await resolveAudiusTrack(artist, title);
@@ -913,39 +1091,58 @@ function Player({ queue, setQueue }) {
   };
 
   const at = i => {
-    if (!queue || !queue[i]) return;
-    startPlayback(queue[i], i);
+    const q = queueRef.current?.length ? queueRef.current : queue;
+    if (!q || !q[i]) return;
+    startPlayback(q[i], i);
   };
 
-  const play = t => {
-    const i = queue.findIndex(x => x.id === t.id);
+  const play = (t, explicitQueue = null) => {
+    const activeQueue =
+      explicitQueue && Array.isArray(explicitQueue) && explicitQueue.length > 0
+        ? explicitQueue
+        : (queueRef.current?.length ? queueRef.current : queue);
+    if (explicitQueue && Array.isArray(explicitQueue)) {
+      setQueue(explicitQueue);
+      queueRef.current = explicitQueue;
+    }
+    const i = activeQueue.findIndex(x => x.id === t.id);
     if (i >= 0) {
-      startPlayback(queue[i], i);
+      startPlayback(activeQueue[i], i);
     } else {
-      const n = [...queue, t];
+      const n = [...activeQueue, t];
       setQueue(n);
+      queueRef.current = n;
       startPlayback(t, n.length - 1);
     }
   };
 
   const next = () => {
-    if (!queue.length) return;
-    if (!repeat && idx === queue.length - 1 && !shuffle) return;
+    const q = queueRef.current?.length ? queueRef.current : queue;
+    if (!q || !q.length) return;
+    const currentIdx = idxRef.current >= 0 ? idxRef.current : idx;
+    if (!repeatRef.current && currentIdx === q.length - 1 && !shuffleRef.current) return;
     let n =
-      shuffle && queue.length > 1
-        ? Math.floor(Math.random() * queue.length)
-        : (idx + 1) % queue.length;
-    if (shuffle && queue.length > 1 && n === idx) n = (n + 1) % queue.length;
+      shuffleRef.current && q.length > 1
+        ? Math.floor(Math.random() * q.length)
+        : (currentIdx + 1) % q.length;
+    if (shuffleRef.current && q.length > 1 && n === currentIdx) n = (n + 1) % q.length;
     at(n);
   };
 
   const previous = () => {
+    const q = queueRef.current?.length ? queueRef.current : queue;
+    if (!q || !q.length) return;
     if (time > 5) {
       seek(0);
       return;
     }
-    if (queue.length) at((idx - 1 + queue.length) % queue.length);
+    const currentIdx = idxRef.current >= 0 ? idxRef.current : idx;
+    let n = currentIdx - 1;
+    if (n < 0) n = q.length - 1;
+    at(n);
   };
+
+  nextFnRef.current = next;
 
   const togglePlay = () => {
     if (!track) return;
@@ -1404,14 +1601,46 @@ function App() {
   };
 
   useEffect(() => {
-    fetch(API + '/tracks/trending?limit=12&app_name=' + APP)
-      .then(r => r.json())
+    fetch('/api/youtube-search?q=top+brasil+musicas+mais+tocadas')
+      .then(r => (r.ok ? r.json() : null))
       .then(d => {
-        if (d.data) {
-          setTrending(d.data.filter(t => (t.duration || 0) > 40));
+        if (d?.results?.length) {
+          setTrending(d.results);
+        } else {
+          fetch(API + '/tracks/trending?limit=12&app_name=' + APP)
+            .then(r => r.json())
+            .then(aud => {
+              if (aud.data) {
+                const list = aud.data
+                  .filter(t => (t.duration || 0) > 40)
+                  .map(t => ({
+                    ...t,
+                    provider: 'audius',
+                    sourceUrl: `${API}/tracks/${t.id}/stream?app_name=${APP}`
+                  }));
+                setTrending(list);
+              }
+            })
+            .catch(() => {});
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        fetch(API + '/tracks/trending?limit=12&app_name=' + APP)
+          .then(r => r.json())
+          .then(aud => {
+            if (aud.data) {
+              const list = aud.data
+                .filter(t => (t.duration || 0) > 40)
+                .map(t => ({
+                  ...t,
+                  provider: 'audius',
+                  sourceUrl: `${API}/tracks/${t.id}/stream?app_name=${APP}`
+                }));
+              setTrending(list);
+            }
+          })
+          .catch(() => {});
+      });
   }, []);
 
   useEffect(() => {
@@ -1438,29 +1667,49 @@ function App() {
     setLoading(true);
     setMsg('');
     try {
-      let c = [];
-      try {
-        const r = await fetch(
+      // Query YouTube search and Audius in parallel
+      const [ytRes, audiusRes] = await Promise.allSettled([
+        fetch(`/api/youtube-search?q=${encodeURIComponent(term)}`).then(r => r.ok ? r.json() : null),
+        fetch(
           API +
             '/tracks/search?query=' +
             encodeURIComponent(term) +
-            '&limit=30&sort_method=relevant&app_name=' +
+            '&limit=20&sort_method=relevant&app_name=' +
             APP
-        );
-        if (r.ok) {
-          const j = await r.json();
-          const raw = j.data || [];
-          const filtered = raw.filter(t => !bad(t.title) && !bad(t.user?.name));
-          c = filtered;
-        }
-      } catch {}
+        ).then(r => r.ok ? r.json() : null)
+      ]);
 
-      // Audius is the only automatic audio resolver here.
-      // Protected-platform audio is never extracted or proxied.
+      let ytTracks = [];
+      if (ytRes.status === 'fulfilled' && ytRes.value?.results) {
+        ytTracks = ytRes.value.results;
+      }
 
-      setResults(c);
+      let audiusTracks = [];
+      if (audiusRes.status === 'fulfilled' && audiusRes.value?.data) {
+        const raw = audiusRes.value.data || [];
+        const filtered = raw.filter(t => !bad(t.title, term) && !bad(t.user?.name, term));
+        const baseList = filtered.length > 0 ? filtered : raw;
+        audiusTracks = baseList.map(t => ({
+          ...t,
+          provider: 'audius',
+          sourceUrl: `${API}/tracks/${t.id}/stream?app_name=${APP}`
+        }));
+      }
+
+      // Combine YouTube & Audius results, keeping YouTube results at top for broad catalog coverage
+      const combined = [...ytTracks, ...audiusTracks];
+      const seen = new Set();
+      const unique = combined.filter(t => {
+        const key = (t.title + '|' + (t.artist || t.user?.name)).toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+
+      const finalResults = unique.length > 0 ? unique : audiusTracks;
+      setResults(finalResults);
       setPage('search');
-      setMsg(c.length ? '' : 'Nenhuma faixa encontrada.');
+      setMsg(finalResults.length ? '' : 'Nenhuma faixa encontrada.');
     } catch {
       setMsg('O serviço de música está temporariamente indisponível.');
     } finally {
@@ -1533,7 +1782,7 @@ function App() {
 
     if (autoplay && sanitized.length > 0) {
       setQueue(sanitized);
-      p.play(sanitized[0]);
+      p.play(sanitized[0], sanitized);
     }
 
     setSelectedPlaylistId(playlistId);
@@ -1542,8 +1791,10 @@ function App() {
 
   const playPlaylist = (playlist, startIndex = 0) => {
     if (!playlist?.tracks?.length) return;
-    setQueue(playlist.tracks);
-    p.play(playlist.tracks[startIndex] || playlist.tracks[0]);
+    const list = [...playlist.tracks];
+    const targetTrack = list[startIndex] || list[0];
+    setQueue(list);
+    p.play(targetTrack, list);
   };
 
   const deletePlaylist = id => {
@@ -1703,26 +1954,21 @@ function App() {
                   <Plus size={16} />
                 </button>
               </div>
-              <div style={{ maxHeight: 'calc(100vh - 480px)', overflowY: 'auto' }}>
+              <div className="sidebar-playlists-scroll">
                 {playlists.map(pl => (
                   <button
                     key={pl.id}
-                    className={page === 'playlist-detail' && selectedPlaylistId === pl.id ? 'on' : ''}
+                    className={`sidebar-pl-item ${page === 'playlist-detail' && selectedPlaylistId === pl.id ? 'on' : ''}`}
                     onClick={() => {
                       setSelectedPlaylistId(pl.id);
                       setPage('playlist-detail');
                     }}
-                    style={{
-                      fontSize: 13,
-                      padding: '8px 10px',
-                      whiteSpace: 'nowrap',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      display: 'block'
-                    }}
                     title={pl.name}
                   >
-                    {pl.name}
+                    <ListMusic size={14} style={{ opacity: 0.6, flexShrink: 0 }} />
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {pl.name}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -2065,7 +2311,12 @@ function App() {
                     <h2 style={{ marginTop: 32 }}>Músicas em Alta</h2>
                     <div className="tracks">
                       {trending.map((t, i) => (
-                        <div className="track" key={`trend_${t.id || 'tr'}_${i}`}>
+                        <div
+                          className="track"
+                          key={`trend_${t.id || 'tr'}_${i}`}
+                          onClick={() => p.play(t, trending)}
+                          style={{ cursor: 'pointer' }}
+                        >
                           <img src={art(t)} alt="" />
                           <div className="meta">
                             <b>{t.title}</b>
@@ -2074,19 +2325,28 @@ function App() {
                           <span className="dur">{fmt(t.duration)}</span>
                           <button
                             className={liked.some(a => a.id === t.id) ? 'liked' : ''}
-                            onClick={() => like(t)}
+                            onClick={e => {
+                              e.stopPropagation();
+                              like(t);
+                            }}
                             title="Curtir"
                           >
                             <Heart size={18} />
                           </button>
-                          <button onClick={() => setShowAddToPlaylistModal(t)} title="Adicionar à playlist">
+                          <button
+                            onClick={e => {
+                              e.stopPropagation();
+                              setShowAddToPlaylistModal(t);
+                            }}
+                            title="Adicionar à playlist"
+                          >
                             <Plus size={18} />
                           </button>
                           <button
                             className="rowPlay"
-                            onClick={() => {
-                              setQueue(trending);
-                              p.play(t);
+                            onClick={e => {
+                              e.stopPropagation();
+                              p.play(t, trending);
                             }}
                             title="Tocar"
                           >
@@ -2221,7 +2481,7 @@ function App() {
                             onClick={() => {
                               const shuffled = [...currentPl.tracks].sort(() => Math.random() - 0.5);
                               setQueue(shuffled);
-                              p.play(shuffled[0]);
+                              p.play(shuffled[0], shuffled);
                             }}
                             disabled={!currentPl.tracks.length}
                             style={{
@@ -2267,7 +2527,12 @@ function App() {
                     <h2 style={{ marginTop: 32 }}>Músicas da Playlist</h2>
                     <div className="tracks">
                       {currentPl.tracks.map((t, idx) => (
-                        <div className="track" key={`pl_${currentPl.id}_${t.id || idx}_${idx}`}>
+                        <div
+                          className="track"
+                          key={`pl_${currentPl.id}_${t.id || idx}_${idx}`}
+                          onClick={() => playPlaylist(currentPl, idx)}
+                          style={{ cursor: 'pointer' }}
+                        >
                           <img src={art(t)} alt="" />
                           <div className="meta">
                             <b>{t.title}</b>
@@ -2276,13 +2541,19 @@ function App() {
                           <span className="dur">{fmt(t.duration)}</span>
                           <button
                             className={liked.some(a => a.id === t.id) ? 'liked' : ''}
-                            onClick={() => like(t)}
+                            onClick={e => {
+                              e.stopPropagation();
+                              like(t);
+                            }}
                             title="Curtir"
                           >
                             <Heart size={18} />
                           </button>
                           <button
-                            onClick={() => removeTrackFromPlaylist(currentPl.id, t.id)}
+                            onClick={e => {
+                              e.stopPropagation();
+                              removeTrackFromPlaylist(currentPl.id, t.id);
+                            }}
                             title="Remover desta playlist"
                             style={{ color: '#ef4444' }}
                           >
@@ -2290,7 +2561,10 @@ function App() {
                           </button>
                           <button
                             className="rowPlay"
-                            onClick={() => playPlaylist(currentPl, idx)}
+                            onClick={e => {
+                              e.stopPropagation();
+                              playPlaylist(currentPl, idx);
+                            }}
                             title="Tocar a partir daqui"
                           >
                             <Play size={16} />
@@ -2579,7 +2853,12 @@ function App() {
                   <>
                     <div className="tracks">
                       {library.map((t, i) => (
-                        <div className="track" key={`lib_${t.id || 'tr'}_${i}`}>
+                        <div
+                          className="track"
+                          key={`lib_${t.id || 'tr'}_${i}`}
+                          onClick={() => p.play(t, library)}
+                          style={{ cursor: 'pointer' }}
+                        >
                           <img src={art(t)} alt="" />
                           <div className="meta">
                             <b>{t.title}</b>
@@ -2588,19 +2867,28 @@ function App() {
                           <span className="dur">{fmt(t.duration)}</span>
                           <button
                             className={liked.some(a => a.id === t.id) ? 'liked' : ''}
-                            onClick={() => like(t)}
+                            onClick={e => {
+                              e.stopPropagation();
+                              like(t);
+                            }}
                             title="Curtir"
                           >
                             <Heart size={18} />
                           </button>
-                          <button onClick={() => setShowAddToPlaylistModal(t)} title="Adicionar à playlist">
+                          <button
+                            onClick={e => {
+                              e.stopPropagation();
+                              setShowAddToPlaylistModal(t);
+                            }}
+                            title="Adicionar à playlist"
+                          >
                             <Plus size={18} />
                           </button>
                           <button
                             className="rowPlay"
-                            onClick={() => {
-                              setQueue(library);
-                              p.play(t);
+                            onClick={e => {
+                              e.stopPropagation();
+                              p.play(t, library);
                             }}
                             title="Tocar"
                           >
@@ -2625,8 +2913,7 @@ function App() {
                   {liked.length > 0 && (
                     <button
                       onClick={() => {
-                        setQueue(liked);
-                        p.play(liked[0]);
+                        p.play(liked[0], liked);
                       }}
                       style={{
                         background: '#a855f7',
@@ -2647,7 +2934,12 @@ function App() {
                 </div>
                 <div className="tracks">
                   {liked.map((t, i) => (
-                    <div className="track" key={`liked_${t.id || 'tr'}_${i}`}>
+                    <div
+                      className="track"
+                      key={`liked_${t.id || 'tr'}_${i}`}
+                      onClick={() => p.play(t, liked)}
+                      style={{ cursor: 'pointer' }}
+                    >
                       <img src={art(t)} alt="" />
                       <div className="meta">
                         <b>{t.title}</b>
@@ -2656,19 +2948,28 @@ function App() {
                       <span className="dur">{fmt(t.duration)}</span>
                       <button
                         className="liked"
-                        onClick={() => like(t)}
+                        onClick={e => {
+                          e.stopPropagation();
+                          like(t);
+                        }}
                         title="Descurtir"
                       >
                         <Heart size={18} />
                       </button>
-                      <button onClick={() => setShowAddToPlaylistModal(t)} title="Adicionar à playlist">
+                      <button
+                        onClick={e => {
+                          e.stopPropagation();
+                          setShowAddToPlaylistModal(t);
+                        }}
+                        title="Adicionar à playlist"
+                      >
                         <Plus size={18} />
                       </button>
                       <button
                         className="rowPlay"
-                        onClick={() => {
-                          setQueue(liked);
-                          p.play(t);
+                        onClick={e => {
+                          e.stopPropagation();
+                          p.play(t, liked);
                         }}
                         title="Tocar"
                       >
@@ -2702,7 +3003,12 @@ function App() {
                 {msg && <p className="muted">{msg}</p>}
                 <div className="tracks">
                   {results.map((t, i) => (
-                    <div className="track" key={`search_${t.id || 'tr'}_${i}`}>
+                    <div
+                      className="track"
+                      key={`search_${t.id || 'tr'}_${i}`}
+                      onClick={() => p.play(t, results)}
+                      style={{ cursor: 'pointer' }}
+                    >
                       <img src={art(t)} alt="" />
                       <div className="meta">
                         <b>{t.title}</b>
@@ -2711,19 +3017,28 @@ function App() {
                       <span className="dur">{fmt(t.duration)}</span>
                       <button
                         className={liked.some(a => a.id === t.id) ? 'liked' : ''}
-                        onClick={() => like(t)}
+                        onClick={e => {
+                          e.stopPropagation();
+                          like(t);
+                        }}
                         title="Curtir"
                       >
                         <Heart size={18} />
                       </button>
-                      <button onClick={() => setShowAddToPlaylistModal(t)} title="Adicionar à playlist">
+                      <button
+                        onClick={e => {
+                          e.stopPropagation();
+                          setShowAddToPlaylistModal(t);
+                        }}
+                        title="Adicionar à playlist"
+                      >
                         <Plus size={18} />
                       </button>
                       <button
                         className="rowPlay"
-                        onClick={() => {
-                          setQueue(results);
-                          p.play(t);
+                        onClick={e => {
+                          e.stopPropagation();
+                          p.play(t, results);
                         }}
                         title="Tocar"
                       >
@@ -2766,11 +3081,15 @@ function App() {
                   JSON.stringify({ event: 'listening', id: 1 }),
                   '*'
                 );
+                e.target.contentWindow?.postMessage(
+                  JSON.stringify({ event: 'command', func: 'playVideo', args: [] }),
+                  '*'
+                );
               } catch {}
             }}
             src={
               p.mode === 'yt' && p.track?.youtubeId
-                ? `https://www.youtube.com/embed/${p.track.youtubeId}?autoplay=1&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}&controls=0&disablekb=1&fs=0&rel=0`
+                ? `https://www.youtube.com/embed/${p.track.youtubeId}?autoplay=1&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}&widget_referrer=${encodeURIComponent(window.location.origin)}&controls=0&disablekb=1&fs=0&rel=0`
                 : 'about:blank'
             }
             title="Audio Stream"
@@ -2781,6 +3100,18 @@ function App() {
         </div>
 
         <footer>
+          <audio
+            ref={p.ref}
+            src={p.src || null}
+            preload="auto"
+            onError={e => {
+              const mediaError = e.currentTarget?.error;
+              if (mediaError && p.track && p.src && !p.src.startsWith('data:')) {
+                console.warn('Audio element media error:', mediaError.code, mediaError.message);
+                p.fallbackToSource(p.track, p.src);
+              }
+            }}
+          />
           {p.track && (
             <div className="mini-progress-bar">
               <div
@@ -2866,14 +3197,6 @@ function App() {
                 step=".01"
                 value={p.vol}
                 onChange={e => p.changeVol(+e.target.value)}
-              />
-              <audio
-                ref={p.ref}
-                src={p.src || null}
-                onError={() => {
-                  console.warn('Audio element error, invalidating failed source');
-                  if (p.track && p.src) p.fallbackToSource(p.track, p.src);
-                }}
               />
             </>
           ) : (
@@ -3907,6 +4230,18 @@ function ImportPanel({ onImport, onPlay, authUser, onGoogleLogin }) {
       }
     } catch {}
 
+    try {
+      const q = `${artist} ${title}`.trim();
+      const ytRes = await fetch(`/api/youtube-search?q=${encodeURIComponent(q)}`);
+      const ytData = await ytRes.json();
+      if (ytData?.results?.length) {
+        const best = ytData.results[0];
+        setFound(best);
+        setStatus('Música encontrada com sucesso!');
+        return;
+      }
+    } catch {}
+
     setStatus('Nenhuma gravação compatível encontrada.');
   };
 
@@ -4249,51 +4584,52 @@ function ImportPanel({ onImport, onPlay, authUser, onGoogleLogin }) {
             </div>
 
             <div className="tracks" style={{ maxHeight: 340, overflowY: 'auto' }}>
-              {tracks.map((t, idx) => (
-                <div className="track" key={`import_${t.id || 'tr'}_${idx}`}>
-                  <img src={art(t)} alt="" />
-                  <div className="meta">
-                    <b>{t.name || t.title}</b>
-                    <span>{t.artist || t.artists?.[0]?.name || 'Artista'}</span>
+              {(() => {
+                const mappedList = tracks.map((tr, i) => ({
+                  id: tr.id || 'tr_' + i,
+                  title: tr.name || tr.title,
+                  user: { name: tr.artist || tr.artists?.[0]?.name || 'Artista' },
+                  duration: tr.duration || 190,
+                  artwork: { '_480x480': tr.image || art({}) },
+                  spotifyUri: tr.spotifyUri,
+                  sourceUrl: null
+                }));
+                return tracks.map((t, idx) => (
+                  <div
+                    className="track"
+                    key={`import_${t.id || 'tr'}_${idx}`}
+                    onClick={() => onPlay(mappedList[idx], mappedList)}
+                    style={{ cursor: 'pointer' }}
+                  >
+                    <img src={art(t)} alt="" />
+                    <div className="meta">
+                      <b>{t.name || t.title}</b>
+                      <span>{t.artist || t.artists?.[0]?.name || 'Artista'}</span>
+                    </div>
+                    <span className="dur">{fmt(t.duration || 190)}</span>
+                    <button
+                      onClick={e => {
+                        e.stopPropagation();
+                        const singleTrack = mappedList[idx];
+                        onImport([singleTrack], false);
+                      }}
+                      title="Adicionar à Biblioteca"
+                    >
+                      <Plus size={18} />
+                    </button>
+                    <button
+                      className="rowPlay"
+                      onClick={e => {
+                        e.stopPropagation();
+                        onPlay(mappedList[idx], mappedList);
+                      }}
+                      title="Tocar música completa"
+                    >
+                      <Play size={16} />
+                    </button>
                   </div>
-                  <span className="dur">{fmt(t.duration || 190)}</span>
-                  <button
-                    onClick={() => {
-                      const singleTrack = {
-                        id: t.id || 'tr_' + idx,
-                        title: t.name || t.title,
-                        user: { name: t.artist || t.artists?.[0]?.name || 'Artista' },
-                        duration: t.duration || 190,
-                        artwork: { '_480x480': t.image || art({}) },
-                        spotifyUri: t.spotifyUri,
-                        sourceUrl: null
-                      };
-                      onImport([singleTrack], false);
-                    }}
-                    title="Adicionar à Biblioteca"
-                  >
-                    <Plus size={18} />
-                  </button>
-                  <button
-                    className="rowPlay"
-                    onClick={() => {
-                      const item = {
-                        id: t.id || 'tr_' + idx,
-                        title: t.name || t.title,
-                        user: { name: t.artist || t.artists?.[0]?.name || 'Artista' },
-                        duration: t.duration || 190,
-                        artwork: { '_480x480': t.image || art({}) },
-                        spotifyUri: t.spotifyUri,
-                        sourceUrl: null
-                      };
-                      onPlay(item);
-                    }}
-                    title="Tocar música completa"
-                  >
-                    <Play size={16} />
-                  </button>
-                </div>
-              ))}
+                ));
+              })()}
             </div>
           </div>
         )}
@@ -4353,4 +4689,10 @@ function ImportPanel({ onImport, onPlay, authUser, onGoogleLogin }) {
   );
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+const container = document.getElementById('root');
+if (container) {
+  if (!window.__react_root) {
+    window.__react_root = createRoot(container);
+  }
+  window.__react_root.render(<App />);
+}

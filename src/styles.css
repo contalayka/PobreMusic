@@ -69,6 +69,61 @@ aside > button.on {
   color: #c084fc;
 }
 
+.sidebar-playlists-scroll {
+  max-height: calc(100vh - 460px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+}
+
+.sidebar-playlists-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+.sidebar-playlists-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar-playlists-scroll::-webkit-scrollbar-thumb {
+  background: #272730;
+  border-radius: 4px;
+}
+.sidebar-playlists-scroll::-webkit-scrollbar-thumb:hover {
+  background: #3f3f4e;
+}
+
+.sidebar-pl-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent !important;
+  border: 0 !important;
+  color: #a1a1aa !important;
+  padding: 8px 10px;
+  border-radius: 8px;
+  text-align: left;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 13px;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  outline: none;
+  margin-bottom: 2px;
+  box-sizing: border-box;
+}
+
+.sidebar-pl-item:hover {
+  background: #181820 !important;
+  color: #ffffff !important;
+}
+
+.sidebar-pl-item.on {
+  background: #20172e !important;
+  color: #c084fc !important;
+  font-weight: 600;
+}
+
 .sideTitle {
   color: #71717a;
   font-size: 11px;
