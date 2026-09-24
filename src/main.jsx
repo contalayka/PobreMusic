@@ -33,10 +33,6 @@ import {
   Smartphone
 } from 'lucide-react';
 import './styles.css';
-
-const SILENT_AUDIO_URI =
-  'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
-
 import {
   firebaseConfig,
   auth,
@@ -52,6 +48,9 @@ import {
   onSnapshot,
   handleFirestoreError
 } from './firebase';
+
+const SILENT_AUDIO_URI =
+  'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
 
 const API = 'https://api.audius.co/v1';
 const APP = 'PobreMusic';
@@ -70,6 +69,46 @@ const getStoredJSON = (key, fallback) => {
 
 const isSpotifyPreview = url =>
   typeof url === 'string' && (url.includes('p.scdn.co') || url.includes('spotify.com/preview'));
+
+const norm = v =>
+  (v || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+
+const bad = v =>
+  /\b(cover|karaoke|acapella|a cappella|instrumental|remix|rework|bootleg|edit|sped up|slowed|nightcore|version|tribute|dublagem|parodia|parody|live|ao vivo)\b/i.test(
+    v || ''
+  );
+
+const names = t => [t?.user?.name, t?.artist, t?.artist_name].filter(Boolean).map(norm);
+
+const exact = (t, title, artist) => {
+  const normT = norm(t?.title);
+  const normWanted = norm(title);
+  const artistMatch = names(t).some(a => a.includes(norm(artist)) || norm(artist).includes(a));
+  return normT.includes(normWanted) && artistMatch && !bad(t?.title);
+};
+
+const smartMatch = (t, title, artist) => {
+  const normT = norm(t?.title);
+  const normTitle = norm(title);
+  const normArtist = norm(artist);
+
+  const titleWords = normTitle.split(' ').filter(w => w.length > 2);
+  const hasTitle =
+    titleWords.length > 0 ? titleWords.every(w => normT.includes(w)) : normT.includes(normTitle);
+  if (!hasTitle) return false;
+
+  const artistNames = names(t);
+  const hasArtist =
+    !!normArtist &&
+    artistNames.some(a => a === normArtist || a.includes(normArtist) || normArtist.includes(a));
+
+  return hasArtist && !bad(t?.title) && !bad(artistNames.join(' '));
+};
 
 const resolveFullAudio = async (t, options = {}) => {
   if (!t) return t;
@@ -114,46 +153,6 @@ const resolveFullAudio = async (t, options = {}) => {
     console.warn('Could not resolve full audio:', err);
   }
   return t;
-};
-
-const norm = v =>
-  (v || '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-
-const bad = v =>
-  /\b(cover|karaoke|acapella|a cappella|instrumental|remix|rework|bootleg|edit|sped up|slowed|nightcore|version|tribute|dublagem|parodia|parody|live|ao vivo)\b/i.test(
-    v || ''
-  );
-
-const names = t => [t?.user?.name, t?.artist, t?.artist_name].filter(Boolean).map(norm);
-
-const exact = (t, title, artist) => {
-  const normT = norm(t?.title);
-  const normWanted = norm(title);
-  const artistMatch = names(t).some(a => a.includes(norm(artist)) || norm(artist).includes(a));
-  return normT.includes(normWanted) && artistMatch && !bad(t?.title);
-};
-
-const smartMatch = (t, title, artist) => {
-  const normT = norm(t?.title);
-  const normTitle = norm(title);
-  const normArtist = norm(artist);
-
-  const titleWords = normTitle.split(' ').filter(w => w.length > 2);
-  const hasTitle =
-    titleWords.length > 0 ? titleWords.every(w => normT.includes(w)) : normT.includes(normTitle);
-  if (!hasTitle) return false;
-
-  const artistNames = names(t);
-  const hasArtist =
-    !!normArtist &&
-    artistNames.some(a => a === normArtist || a.includes(normArtist) || normArtist.includes(a));
-
-  return hasArtist && !bad(t?.title) && !bad(artistNames.join(' '));
 };
 
 const resolveAudiusTrack = async (artist, title) => {
