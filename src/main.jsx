@@ -71,7 +71,7 @@ const getStoredJSON = (key, fallback) => {
 const isSpotifyPreview = url =>
   typeof url === 'string' && (url.includes('p.scdn.co') || url.includes('spotify.com/preview'));
 
-const resolveFullAudio = async t => {
+const resolveFullAudio = async (t, options = {}) => {
   if (!t) return t;
   if (t.youtubeId) return t;
 
@@ -79,9 +79,9 @@ const resolveFullAudio = async t => {
   const title = t.name || t.title || '';
   if (!title) return t;
 
-  const cacheKey = 'v2:' + norm(`${artist} ${title}`);
+  const cacheKey = 'v3:' + norm(`${artist} ${title}`);
   const cache = getStoredJSON('pm-full-audio-cache', {});
-  if (cache[cacheKey] && cache[cacheKey].sourceUrl) {
+  if (!options.force && cache[cacheKey] && cache[cacheKey].sourceUrl && cache[cacheKey].sourceUrl !== options.failedUrl) {
     return {
       ...t,
       sourceUrl: cache[cacheKey].sourceUrl,
@@ -91,7 +91,10 @@ const resolveFullAudio = async t => {
   }
 
   try {
-    const res = await fetch(`/api/full-audio?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(title)}`);
+    const bust = options.force ? `&retry=${Date.now()}` : '';
+    const res = await fetch(`/api/full-audio?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(title)}${bust}`, {
+      cache: options.force ? 'no-store' : 'default'
+    });
     if (res.ok) {
       const data = await res.json();
       if (data.sourceUrl) {
@@ -755,26 +758,58 @@ function Player({ queue, setQueue }) {
     };
   }, [playing, mode]);
 
-  const fallbackToSource = async t => {
+  const unlockAudio = () => {
+    const e = ref.current;
+    if (!e) return;
+    try {
+      e.volume = 0;
+      e.src = SILENT_AUDIO_URI;
+      e.loop = true;
+      const p = e.play();
+      if (p?.catch) p.catch(() => {});
+    } catch {}
+  };
+
+  const playAudioSource = async (audioUrl, sourceTrack, { allowFallback = true } = {}) => {
+    if (!audioUrl || !ref.current) return false;
+    const e = ref.current;
+    e.src = audioUrl;
+    e.loop = false;
+    e.volume = vol;
+    try {
+      await e.play();
+      return true;
+    } catch (err) {
+      console.warn('Audio source failed:', err);
+      if (allowFallback) await fallbackToSource(sourceTrack, audioUrl);
+      else setPlaying(false);
+      return false;
+    }
+  };
+
+  const fallbackToSource = async (t, failedUrl = null) => {
     setLoadingTrack(true);
     const artist = t.user?.name || t.artist || t.artists?.[0]?.name || '';
     const title = t.name || t.title || '';
-    const resolved = await resolveFullAudio(t);
-    if (resolved?.sourceUrl) {
-      const updated = { ...t, sourceUrl: resolved.sourceUrl, duration: resolved.duration || t.duration || 180, artwork: t.artwork || resolved.artwork };
+    const cacheKey = 'v3:' + norm(`${artist} ${title}`);
+    const cache = getStoredJSON('pm-full-audio-cache', {});
+    if (failedUrl && cache[cacheKey]?.sourceUrl === failedUrl) {
+      delete cache[cacheKey];
+      try { localStorage.setItem('pm-full-audio-cache', JSON.stringify(cache)); } catch {}
+    }
+    const cleanTrack = failedUrl ? { ...t, sourceUrl: null } : t;
+    const resolved = await resolveFullAudio(cleanTrack, { force: !!failedUrl, failedUrl });
+    if (resolved?.sourceUrl && resolved.sourceUrl !== failedUrl) {
+      const updated = { ...cleanTrack, sourceUrl: resolved.sourceUrl, duration: resolved.duration || t.duration || 180, artwork: t.artwork || resolved.artwork };
       setTrack(updated);
       setDur(updated.duration);
       setMode('audio');
       setSrc(updated.sourceUrl);
       setPlaying(true);
-      if (ref.current) {
-        ref.current.src = updated.sourceUrl;
-        ref.current.loop = false;
-        ref.current.volume = vol;
-        ref.current.play().catch(() => setPlaying(false));
-      }
+      await playAudioSource(updated.sourceUrl, updated, { allowFallback: false });
     } else {
       setPlaying(false);
+      userWantsPlayRef.current = false;
       console.warn('No playable source found for:', artist, title);
     }
     setLoadingTrack(false);
@@ -783,6 +818,7 @@ function Player({ queue, setQueue }) {
   const startPlayback = async (t, i) => {
     if (!t) return;
     initWebAudioKeepAlive();
+    unlockAudio();
     userWantsPlayRef.current = true;
     window.__keepBackgroundAudioPlaying = true;
     setIdx(i);
@@ -828,12 +864,7 @@ function Player({ queue, setQueue }) {
       setSrc(audioUrl);
       setPlaying(true);
       if (ref.current) {
-        ref.current.src = audioUrl;
-        ref.current.volume = vol;
-        ref.current.play().catch(err => {
-          console.warn('Audio play failed, falling back to supported source:', err);
-          fallbackToSource(t);
-        });
+        playAudioSource(audioUrl, t);
       }
       return;
     }
@@ -872,12 +903,7 @@ function Player({ queue, setQueue }) {
       setSrc(audiusMatch.sourceUrl);
       setPlaying(true);
       if (ref.current) {
-        ref.current.src = audiusMatch.sourceUrl;
-        ref.current.volume = vol;
-        ref.current.play().catch(err => {
-          console.warn('Audius play error, falling back:', err);
-          fallbackToSource(updatedTrack);
-        });
+        playAudioSource(audiusMatch.sourceUrl, updatedTrack);
       }
       return;
     }
@@ -2846,8 +2872,8 @@ function App() {
                 ref={p.ref}
                 src={p.src || null}
                 onError={() => {
-                  console.warn('Audio playback error, switching to alternative stream');
-                  if (p.track) p.fallbackToSource(p.track);
+                  console.warn('Audio element error, invalidating failed source');
+                  if (p.track && p.src) p.fallbackToSource(p.track, p.src);
                 }}
               />
             </>
