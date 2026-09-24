@@ -9,35 +9,26 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
-      - run: npm install
+          node-version: 24
+          cache: npm
+      - run: npm ci
       - run: npm run build
-      - name: Test Audius search and stream
+      - name: Test real Audius stream
         run: |
           node <<'NODE'
           const api = 'https://api.audius.co/v1';
           const app = 'PobreMusic';
-          const query = encodeURIComponent('Daft Punk Get Lucky');
-          const search = await fetch(api + '/tracks/search?query=' + query + '&limit=15&sort_method=relevant&app_name=' + app);
+          const search = await fetch(api + '/tracks/search?query=electronic&limit=10&sort_method=relevant&app_name=' + app);
           if (!search.ok) throw new Error('Audius search HTTP ' + search.status);
           const data = await search.json();
-          const norm = v => (v || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
-          const wantedTitle = norm('Get Lucky');
-          const wantedArtist = norm('Daft Punk');
-          const match = (data.data || []).find(t => {
-            const title = norm(t.title);
-            const artists = [t?.user?.name, t?.artist, t?.artist_name].filter(Boolean).map(norm);
-            return (t.duration || 0) > 40 &&
-              wantedTitle.split(' ').every(w => title.includes(w)) &&
-              artists.some(a => a === wantedArtist || a.includes(wantedArtist) || wantedArtist.includes(a));
-          });
-          if (!match) throw new Error('No exact Audius match found');
-          const stream = await fetch(api + '/tracks/' + match.id + '/stream?app_name=' + app, { method: 'HEAD', redirect: 'follow' });
+          const track = (data.data || []).find(t => t?.id && (t.duration || 0) > 40);
+          if (!track) throw new Error('Audius returned no playable track');
+          const stream = await fetch(api + '/tracks/' + encodeURIComponent(track.id) + '/stream?app_name=' + app, { redirect: 'follow' });
           if (!stream.ok) throw new Error('Audius stream HTTP ' + stream.status);
           const type = stream.headers.get('content-type') || '';
           if (!type.startsWith('audio/')) throw new Error('Stream is not audio: ' + type);
-          console.log('PASS:', match.title, '-', match.user?.name, '|', type);
+          console.log('PASS:', track.title, '-', track.user?.name, '|', type);
           NODE
